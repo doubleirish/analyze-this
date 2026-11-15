@@ -15,19 +15,21 @@ import '../services/db.dart';
 import '../services/discography.dart';
 import '../services/lyric_keywords.dart';
 import 'coverage_view.dart';
+import 'duplicate_cleanup.dart';
 import 'library_screen.dart';
 import 'readiness_view.dart';
 import 'mix_add.dart';
+import 'with_player.dart';
 
 void openArtist(BuildContext context, String? name) {
   if (name == null || name.trim().isEmpty) return;
-  Navigator.push(context, MaterialPageRoute(builder: (_) => ArtistDetailScreen(name: name)));
+  Navigator.push(context, playerRoute(builder: (_) => ArtistDetailScreen(name: name)));
 }
 
 void openAlbum(BuildContext context, String? album, String? artist) {
   if (album == null || album.trim().isEmpty) return;
   Navigator.push(
-      context, MaterialPageRoute(builder: (_) => AlbumDetailScreen(album: album, artist: artist)));
+      context, playerRoute(builder: (_) => AlbumDetailScreen(album: album, artist: artist)));
 }
 
 /// Artist photo (Deezer, cached on disk), else album art from one of their songs.
@@ -251,35 +253,15 @@ Widget _card(BuildContext context,
   ]);
 }
 
-/// Songs of one album in track (file name) order. Files sharing a leading track
-/// number (duplicate rips) collapse to the largest one.
+/// Album files in order; duplicate selection happens after checking availability.
 List<Song> _byFile(Iterable<Song> songs) {
-  final sorted = [...songs]
+  return [...songs]
     ..sort((a, b) => a.path.toLowerCase().compareTo(b.path.toLowerCase()));
-  final best = <String, Song>{};
-  final out = <Song>[];
-  for (final s in sorted) {
-    final m = RegExp(r'^(\d{1,3})\s*[-._ ]').firstMatch(baseName(s.path));
-    if (m == null) {
-      out.add(s);
-      continue;
-    }
-    final k = int.parse(m.group(1)!).toString();
-    final prev = best[k];
-    if (prev == null) {
-      best[k] = s;
-      out.add(s);
-    } else if (s.size > prev.size) {
-      out[out.indexOf(prev)] = s;
-      best[k] = s;
-    }
-  }
-  return out;
 }
 
 Future<void> playAlbum(AppState s, String album, String? artist, {bool shuffle = false}) async {
   final songs = await s.db.albumSongs(album, artist);
-  s.playSongList(_isBestOf(album, artist) ? songs : _byFile(songs), shuffle: shuffle);
+  await s.playSongList(_isBestOf(album, artist) ? songs : _byFile(songs), shuffle: shuffle);
 }
 
 /// All of an artist's songs, album by album.
@@ -299,19 +281,20 @@ const _grid = SliverGridDelegateWithMaxCrossAxisExtent(
 
 /// Bulk art download button; shows progress while it runs and a result snackbar.
 class _ArtButton extends StatelessWidget {
-  const _ArtButton({required this.label, required this.run});
+  const _ArtButton({required this.label, required this.progress, required this.run});
   final String label;
+  final String? Function(ArtController art) progress;
   final Future<String> Function(AppState s) run;
 
   @override
   Widget build(BuildContext context) {
-    final art = context.watch<ArtController>();
+    final p = context.select<ArtController, String?>(progress);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 8),
       child: OutlinedButton.icon(
         icon: const Icon(Icons.image_search),
-        label: Text(art.artProgress ?? label),
-        onPressed: art.artProgress != null
+        label: Text(p ?? label),
+        onPressed: p != null
             ? null
             : () async {
                 final m = ScaffoldMessenger.of(context);
@@ -330,14 +313,16 @@ class _BrowseControls extends StatelessWidget {
   Widget build(BuildContext context) {
     final s = context.watch<AppState>();
     return Wrap(spacing: 12, crossAxisAlignment: WrapCrossAlignment.center, children: [
-      SegmentedButton<bool>(
+      SegmentedButton<BrowseSort>(
         showSelectedIcon: false,
         segments: const [
-          ButtonSegment(value: true, label: Text('Most songs')),
-          ButtonSegment(value: false, label: Text('Name')),
+          ButtonSegment(value: BrowseSort.songs, label: Text('Most songs')),
+          ButtonSegment(value: BrowseSort.name, label: Text('Name')),
+          ButtonSegment(value: BrowseSort.recent, label: Text('Recently added')),
+          ButtonSegment(value: BrowseSort.favourite, label: Text('Favourites')),
         ],
-        selected: {s.browseBySongs},
-        onSelectionChanged: (v) => s.setBrowse(bySongs: v.first),
+        selected: {s.browseSort},
+        onSelectionChanged: (v) => s.setBrowse(sort: v.first),
       ),
       const Text('Hide with'),
       DropdownButton<int>(
@@ -348,6 +333,11 @@ class _BrowseControls extends StatelessWidget {
           DropdownMenuItem(value: 2, child: Text('2 songs or fewer')),
         ],
         onChanged: (v) => v == null ? null : s.setBrowse(hide: v),
+      ),
+      FilterChip(
+        label: const Text('Hide Best of'),
+        selected: s.hideBestOf,
+        onSelected: (v) => s.setBrowse(hideBest: v),
       ),
     ]);
   }
@@ -373,7 +363,7 @@ class _ArtistsTabState extends State<ArtistsTab> {
   Widget build(BuildContext context) => Padding(
         padding: const EdgeInsets.all(12),
         child: Column(children: [
-          Row(children: [
+          Wrap(spacing: 16, crossAxisAlignment: WrapCrossAlignment.center, children: [
             SizedBox(
               width: 280,
               child: TextField(
@@ -383,13 +373,12 @@ class _ArtistsTabState extends State<ArtistsTab> {
                 onChanged: (_) => setState(() {}),
               ),
             ),
-            const SizedBox(width: 16),
-            const Expanded(child: _BrowseControls()),
             _ArtButton(
                 label: 'Download missing artist photos',
+                progress: (a) => a.artistPhotoProgress,
                 run: (s) async {
                   final list = await s.db.artists(
-                      filter: _filter.text, bySongs: s.browseBySongs, hideUpTo: s.hideUpTo);
+                      filter: _filter.text, sort: s.browseSort, hideUpTo: s.hideUpTo);
                   final n = await s.artwork.downloadMissingArtistPhotos([for (final a in list) a.name]);
                   return '$n artist photo${n == 1 ? '' : 's'} downloaded';
                 }),
@@ -403,12 +392,13 @@ class _ArtistsTabState extends State<ArtistsTab> {
                 icon: const Icon(Icons.save_alt),
                 onPressed: () => _exportGenres(context)),
           ]),
+          const _BrowseControls(),
           const SizedBox(height: 8),
           Expanded(
             child: _Loader<List<ArtistInfo>>(
-              key: ValueKey('${_filter.text}|${context.watch<AppState>().browseBySongs}|${context.watch<AppState>().hideUpTo}'),
+              key: ValueKey('${_filter.text}|${context.watch<AppState>().browseSort}|${context.watch<AppState>().hideUpTo}'),
               load: (s) => s.db.artists(
-                  filter: _filter.text, bySongs: s.browseBySongs, hideUpTo: s.hideUpTo),
+                  filter: _filter.text, sort: s.browseSort, hideUpTo: s.hideUpTo),
               builder: (ctx, list) => list.isEmpty
                   ? const Center(child: Text('No artists yet. Scan some folders first.'))
                   : GridView.builder(
@@ -460,7 +450,7 @@ class _AlbumsTabState extends State<AlbumsTab> {
   Widget build(BuildContext context) => Padding(
         padding: const EdgeInsets.all(12),
         child: Column(children: [
-          Row(children: [
+          Wrap(spacing: 16, crossAxisAlignment: WrapCrossAlignment.center, children: [
             SizedBox(
               width: 280,
               child: TextField(
@@ -470,21 +460,22 @@ class _AlbumsTabState extends State<AlbumsTab> {
                 onChanged: (_) => setState(() {}),
               ),
             ),
-            const SizedBox(width: 16),
-            const Expanded(child: _BrowseControls()),
             _ArtButton(
                 label: 'Download missing album art',
+                progress: (a) => a.albumArtProgress,
                 run: (s) async {
                   final list = await _albumsWithBestOf(s, _filter.text);
-                  final n = await s.artwork.downloadMissingAlbumArt([for (final a in list) a.samplePath]);
+                  final n = await s.artwork.downloadMissingAlbumArt(
+                      [for (final a in list) if (!a.synthetic) a.samplePath]);
                   return '$n album cover${n == 1 ? '' : 's'} downloaded';
                 }),
             const _BestOfButton(),
           ]),
+          const _BrowseControls(),
           const SizedBox(height: 8),
           Expanded(
             child: _Loader<List<AlbumInfo>>(
-              key: ValueKey('${_filter.text}|${context.watch<AppState>().browseBySongs}|${context.watch<AppState>().hideUpTo}|${context.select<AppState, bool>((s) => s.bestOfProgress == null)}'),
+              key: ValueKey('${_filter.text}|${context.watch<AppState>().browseSort}|${context.watch<AppState>().hideUpTo}|${context.watch<AppState>().hideBestOf}|${context.select<AppState, bool>((s) => s.bestOfProgress == null)}'),
               load: (s) => _albumsWithBestOf(s, _filter.text),
               builder: (ctx, list) => list.isEmpty
                   ? const Center(child: Text('No albums yet. Scan some folders first.'))
@@ -561,8 +552,8 @@ class _HealthBadge extends StatelessWidget {
 bool _isBestOf(String album, String? artist) => artist != null && album == bestOfTitle(artist);
 
 Future<List<AlbumInfo>> _albumsWithBestOf(AppState s, String filter) async => [
-      ...await s.db.bestOfAlbums(filter: filter),
-      ...await s.db.albums(filter: filter, bySongs: s.browseBySongs, hideUpTo: s.hideUpTo),
+      if (!s.hideBestOf) ...await s.db.bestOfAlbums(filter: filter),
+      ...await s.db.albums(filter: filter, sort: s.browseSort, hideUpTo: s.hideUpTo),
     ];
 
 Widget _albumCard(BuildContext ctx, AlbumInfo a) {
@@ -652,7 +643,10 @@ class _SongList extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) =>
-      Column(children: [for (final s in songs) SongTile(song: s)]);
+      Column(children: [
+        for (final copies in groupDuplicates(songs))
+          SongTile(song: copies.best, dupes: copies.hidden),
+      ]);
 }
 
 String _bpmRange(Iterable<Song> songs) {
@@ -687,7 +681,7 @@ class _ArtistDetailScreenState extends State<ArtistDetailScreen> {
     final songs = await s.db.search(
         SongQuery(artist: widget.name, exactNames: true, limit: 5000, sort: SongSort.title));
     final albums = sortArtistAlbums([
-      ...await s.db.bestOfAlbums(artist: widget.name),
+      if (!s.hideBestOf) ...await s.db.bestOfAlbums(artist: widget.name),
       ...await s.db.albums(artist: widget.name),
     ]);
     final lyrics = await s.db.lyricsOfArtist(widget.name);
@@ -716,6 +710,7 @@ class _ArtistDetailScreenState extends State<ArtistDetailScreen> {
                   for (final x in d.songs)
                     if ((x.lyrics ?? '').toLowerCase().contains(_keyword)) x
                 ];
+          final unique = resolveDuplicates(shown);
           return ListView(padding: const EdgeInsets.all(12), children: [
             Row(children: [
               Column(mainAxisSize: MainAxisSize.min, children: [
@@ -729,7 +724,7 @@ class _ArtistDetailScreenState extends State<ArtistDetailScreen> {
               Expanded(
                 child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
                   Text(widget.name, style: Theme.of(ctx).textTheme.headlineSmall),
-                  Text('${d.songs.length} songs · ${d.albums.length} albums · ${_bpmRange(d.songs)}'),
+                  Text('${resolveDuplicates(d.songs).length} songs · ${d.albums.length} albums · ${_bpmRange(d.songs)}'),
                   Text('${d.mixes} of them used in saved mixes'),
                   const SizedBox(height: 8),
                   Wrap(spacing: 8, runSpacing: 8, children: [
@@ -737,7 +732,7 @@ class _ArtistDetailScreenState extends State<ArtistDetailScreen> {
                       onPressed:
                           d.songs.isEmpty ? null : () => s.playSongList(_artistOrder(shown)),
                       icon: const Icon(Icons.play_arrow),
-                      label: Text(_keyword.isEmpty ? 'Play all' : 'Play these ${shown.length}'),
+                      label: Text(_keyword.isEmpty ? 'Play all' : 'Play these ${unique.length}'),
                     ),
                     FilledButton.tonalIcon(
                       onPressed: d.songs.isEmpty
@@ -749,9 +744,9 @@ class _ArtistDetailScreenState extends State<ArtistDetailScreen> {
                     FilledButton.tonalIcon(
                       onPressed: d.songs.isEmpty
                           ? null
-                          : () => addAllToMixOrWarn(context, s.mixer, shown),
+                          : () => addAllToMixOrWarn(context, s.mixer, unique),
                       icon: const Icon(Icons.playlist_add),
-                      label: Text(_keyword.isEmpty ? 'Add all to mix' : 'Add these ${shown.length} to mix'),
+                      label: Text(_keyword.isEmpty ? 'Add all to mix' : 'Add these ${unique.length} to mix'),
                     ),
                     FilledButton.tonalIcon(
                       onPressed: d.songs.isEmpty
@@ -800,7 +795,7 @@ class _ArtistDetailScreenState extends State<ArtistDetailScreen> {
               ]),
             ],
             const SizedBox(height: 8),
-            Text('Songs (${shown.length})', style: Theme.of(ctx).textTheme.titleMedium),
+            Text('Songs (${unique.length})', style: Theme.of(ctx).textTheme.titleMedium),
             _SongList(shown),
           ]);
         },
@@ -861,8 +856,8 @@ class _MissingAlbumsState extends State<_MissingAlbums> {
   late Future<List<AlbumRelease>?> _future = _load();
   bool _showMinor = false;
 
-  Future<List<AlbumRelease>?> _load() =>
-      context.read<AppState>().missingAlbumsFor(widget.artist, widget.owned);
+  Future<List<AlbumRelease>?> _load({bool refresh = false}) =>
+      context.read<AppState>().missingAlbumsFor(widget.artist, widget.owned, refresh: refresh);
 
   @override
   Widget build(BuildContext context) {
@@ -876,7 +871,7 @@ class _MissingAlbumsState extends State<_MissingAlbums> {
         } else if (snap.hasError) {
           body = Row(children: [
             const Text('Couldn\'t reach Deezer. '),
-            TextButton(onPressed: () => setState(() => _future = _load()), child: const Text('Retry')),
+            TextButton(onPressed: () => setState(() { _future = _load(); }), child: const Text('Retry')),
           ]);
         } else if (snap.data == null) {
           body = const Text('No matching artist found on Deezer.');
@@ -923,8 +918,17 @@ class _MissingAlbumsState extends State<_MissingAlbums> {
         }
         return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
           const SizedBox(height: 16),
-          Text(snap.data == null ? 'Missing albums' : 'Missing albums (${snap.data!.length}, newest first)',
-              style: title),
+          Row(children: [
+            Text(snap.data == null ? 'Missing albums' : 'Missing albums (${snap.data!.length}, newest first)',
+                style: title),
+            IconButton(
+              tooltip: 'Look up again on Deezer (ignores the cached list)',
+              icon: const Icon(Icons.refresh),
+              onPressed: snap.connectionState != ConnectionState.done
+                  ? null
+                  : () => setState(() { _future = _load(refresh: true); }),
+            ),
+          ]),
           body,
         ]);
       },
@@ -964,8 +968,13 @@ class AlbumDetailScreen extends StatelessWidget {
         load: (s) => s.db.albumSongs(album, artist),
         builder: (ctx, songs) {
           final best = _isBestOf(album, artist);
+          final unique = resolveDuplicates(songs);
           Future.microtask(s.health.ensureHealth);
-          return ListView(padding: const EdgeInsets.all(12), children: [
+          // Avoid ListView's two-pane tooltip semantics bug on Windows:
+          // https://github.com/flutter/flutter/issues/182444.
+          return SingleChildScrollView(
+            padding: const EdgeInsets.all(12),
+            child: Column(crossAxisAlignment: CrossAxisAlignment.stretch, children: [
           Row(children: [
             TrackArt(path: songs.isEmpty ? '' : songs.first.path, size: 140, downloadable: true),
             const SizedBox(width: 16),
@@ -982,7 +991,8 @@ class AlbumDetailScreen extends StatelessWidget {
                 if (artist != null)
                   TextButton(onPressed: () => openArtist(ctx, artist), child: Text(artist!)),
                 Text([
-                  '${songs.length} songs',
+                  '${unique.length} songs',
+                  if (songs.length > unique.length) '${songs.length - unique.length} hidden copies',
                   if (songs.any((x) => x.year != null))
                     '${songs.map((x) => x.year).whereType<int>().reduce((a, b) => a < b ? a : b)}',
                   _bpmRange(songs),
@@ -1006,10 +1016,16 @@ class AlbumDetailScreen extends StatelessWidget {
                   FilledButton.icon(
                   onPressed: songs.isEmpty
                       ? null
-                      : () => addAllToMixOrWarn(context, s.mixer, songs),
+                      : () => addAllToMixOrWarn(context, s.mixer, unique),
                   icon: const Icon(Icons.playlist_add),
                   label: const Text('Add all to mix'),
                 ),
+                  if (damagedDuplicateCopies(songs).isNotEmpty)
+                    FilledButton.tonalIcon(
+                      onPressed: () => confirmDuplicateCleanup(context, songs),
+                      icon: const Icon(Icons.cleaning_services_outlined),
+                      label: const Text('Clean duplicates…'),
+                    ),
                 ]),
                 CoverageSummary(CoverageScope(album: album, artist: artist ?? '')),
                 const _ScanStatus(),
@@ -1018,7 +1034,7 @@ class AlbumDetailScreen extends StatelessWidget {
           ]),
           const SizedBox(height: 8),
           _SongList(songs),
-        ]);
+        ]));
         },
       ),
     );
@@ -1230,7 +1246,7 @@ class _GenresTabState extends State<GenresTab> {
                           genre: g,
                           onTap: () => Navigator.push(
                               ctx,
-                              MaterialPageRoute(
+                              playerRoute(
                                   builder: (_) => GenreDetailScreen(genre: g.name))),
                         );
                       }),
@@ -1468,7 +1484,7 @@ class GenreDetailScreen extends StatelessWidget {
               ),
             ),
             _Loader<List<AlbumInfo>>(
-              load: (s) => s.db.albums(genre: genre, bySongs: true),
+              load: (s) => s.db.albums(genre: genre, sort: BrowseSort.songs),
               builder: (ctx, list) => list.isEmpty
                   ? const Center(child: Text('No albums in this genre'))
                   : GridView.builder(

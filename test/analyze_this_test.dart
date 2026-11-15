@@ -160,12 +160,6 @@ void main() {
     final r = Random(3);
     final picks = [for (var i = 0; i < 300; i++) pickWeighted([five, zero], r)!.path];
     expect(picks.where((p) => p == 'five').length, greaterThan(200));
-    expect(builtinPrograms.map((t) => t.minutes), [
-      closeTo(40, 0.01),
-      closeTo(30, 0.01),
-      closeTo(45, 0.01),
-      closeTo(60, 0.01),
-    ]);
     expect(classicProgram.parts, hasLength(8));
     final back = Program.fromJson(classicProgram.toJson());
     expect(back.parts.map((p) => p.name), classicProgram.parts.map((p) => p.name));

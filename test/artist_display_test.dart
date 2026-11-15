@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:ui' as ui;
 
 import 'package:analyze_this/screens/browse_screens.dart';
+import 'package:analyze_this/screens/library_screen.dart';
 import 'package:analyze_this/services/album_health_controller.dart';
 import 'package:analyze_this/services/app_state.dart';
 import 'package:analyze_this/services/art_controller.dart';
@@ -26,12 +27,89 @@ class _TestState extends AppState {
   @override
   Future<List<AlbumRelease>?> missingAlbumsFor(
     String artist,
-    Iterable<String> owned,
-  ) async => [];
+    Iterable<String> owned, {
+    bool refresh = false,
+  }) async => [];
 }
 
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
+
+  testWidgets('album hides duplicate rows, explains copies, and adds only best to mix', (tester) async {
+    final semantics = tester.ensureSemantics();
+    try {
+      tester.view.physicalSize = const Size(1400, 1000);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.reset);
+      final db = await tester.runAsync(() => MusicDb.open(':memory:'));
+      final state = _TestState(db!);
+      addTearDown(() async { state.dispose(); await db.close(); });
+      final key = dupKeyFor('David Bowie', 'Heroes');
+      await tester.runAsync(() async {
+        for (final (path, size) in [('heroes.mp3', 4800000), ('heroes.wma', 6400000),
+            ('broken.mp3', 8000000)]) {
+          await db.upsertSong(Song(path: path, title: 'Heroes', artist: 'David Bowie',
+              album: 'Bowie', duration: 200, size: size, dupKey: key));
+        }
+        await db.addTag('broken.mp3', corruptTag);
+      });
+      await tester.pumpWidget(MultiProvider(
+        providers: [
+          ChangeNotifierProvider<AppState>.value(value: state),
+          ChangeNotifierProvider<PlaybackController>.value(value: state),
+          ChangeNotifierProvider<AlbumHealthController>.value(value: state.health),
+        ],
+        child: const MaterialApp(home: AlbumDetailScreen(album: 'Bowie', artist: 'David Bowie')),
+      ));
+      for (var i = 0; i < 30 && find.byType(SongTile).evaluate().isEmpty; i++) {
+        await tester.runAsync(() => Future<void>.delayed(const Duration(milliseconds: 30)));
+        await tester.pump();
+      }
+      await tester.pump();
+      await tester.pumpAndSettle();
+      expect(find.byType(SongTile), findsOneWidget);
+      final row = tester.widget<SongTile>(find.byType(SongTile));
+      expect(row.song.path, 'heroes.wma');
+      expect(row.dupes.map((s) => s.path), containsAll(['heroes.mp3', 'broken.mp3']));
+      expect(find.textContaining('1 songs'), findsOneWidget);
+      expect(find.textContaining('2 hidden copies'), findsOneWidget);
+      final copies = find.byIcon(Icons.content_copy);
+      expect(copies, findsOneWidget);
+      final icon = tester.widget<IconButton>(find.ancestor(of: copies, matching: find.byType(IconButton)).first);
+      expect(icon.tooltip, contains('~256 kbps'));
+      expect(icon.tooltip, contains('heroes.mp3'));
+      expect(icon.tooltip, contains('broken.mp3'));
+      expect(icon.tooltip, contains('damaged'));
+      final mouse = await tester.createGesture(kind: ui.PointerDeviceKind.mouse);
+      await mouse.addPointer(location: Offset.zero);
+      await mouse.moveTo(tester.getCenter(copies));
+      await tester.pumpAndSettle();
+      expect(find.text(icon.tooltip!, findRichText: true), findsOneWidget);
+      await mouse.moveTo(tester.getCenter(find.byTooltip('Favourite')));
+      await tester.pumpAndSettle();
+      expect(find.text('Favourite'), findsOneWidget);
+      await mouse.removePointer();
+      await tester.pumpAndSettle();
+      await tester.tap(copies);
+      await tester.pumpAndSettle();
+      expect(find.text('Duplicate copies'), findsOneWidget);
+      await tester.tap(find.text('Close'));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('Add all to mix'));
+      await tester.pump();
+      expect(state.mixer.paths, ['heroes.wma']);
+      await tester.tap(find.text('Clean duplicates…'));
+      await tester.pumpAndSettle();
+      expect(find.text('Delete 1 damaged copies?'), findsOneWidget);
+      await tester.tap(find.text('Cancel'));
+      await tester.pumpAndSettle();
+      expect(await tester.runAsync(() => db.song('broken.mp3')), isNotNull);
+      expect(tester.takeException(), isNull);
+      await tester.pumpWidget(const SizedBox.shrink());
+    } finally {
+      semantics.dispose();
+    }
+  });
 
   testWidgets(
     'many albums wrap at narrow widths and minor releases expand and collapse',

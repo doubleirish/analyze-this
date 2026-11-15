@@ -1,6 +1,6 @@
 import 'dart:math';
 
-import 'package:shared_core/shared_core.dart' show absoluteGear, foldToBand;
+import 'package:shared_core/shared_core.dart' show StepSegment, TimedNote, absoluteGear, foldToBand;
 
 import 'activities.dart';
 import 'db.dart';
@@ -148,7 +148,8 @@ class ProgramPart {
       this.role,
       this.variant,
       this.baseGear,
-      this.gearTop});
+      this.gearTop,
+      this.trainerNote = ''});
   final String name;
   final double minutes;
   final double minRpm;
@@ -172,6 +173,8 @@ class ProgramPart {
   final int? baseGear;
   final int? gearTop;
 
+  /// The trainer's own reminder for this exercise (shown on the phone).
+  final String trainerNote;
   double get targetRpm => (minRpm + maxRpm) / 2;
   double get rpmTolerance => (maxRpm - minRpm) / 2 + 3;
 
@@ -189,6 +192,7 @@ class ProgramPart {
           bool clearVariant = false,
           int? baseGear,
           int? gearTop,
+          String? trainerNote,
           bool clearGears = false}) =>
       ProgramPart(name ?? this.name, minutes ?? this.minutes, minRpm ?? this.minRpm,
           maxRpm ?? this.maxRpm,
@@ -200,7 +204,8 @@ class ProgramPart {
           role: role ?? this.role,
           variant: clearVariant ? null : variant ?? this.variant,
           baseGear: clearGears ? null : baseGear ?? this.baseGear,
-          gearTop: clearGears ? null : gearTop ?? this.gearTop);
+          gearTop: clearGears ? null : gearTop ?? this.gearTop,
+          trainerNote: trainerNote ?? this.trainerNote);
 
   Map<String, Object?> toJson() => {
         'name': name,
@@ -216,6 +221,7 @@ class ProgramPart {
         if (variant != null) 'variant': variant,
         if (baseGear != null) 'baseGear': baseGear,
         if (gearTop != null) 'gearTop': gearTop,
+        if (trainerNote.isNotEmpty) 'trainerNote': trainerNote,
       };
 
   factory ProgramPart.fromJson(Map<String, dynamic> j) => ProgramPart(
@@ -232,24 +238,34 @@ class ProgramPart {
         variant: j['variant'] as String?,
         baseGear: (j['baseGear'] as num?)?.toInt(),
         gearTop: (j['gearTop'] as num?)?.toInt(),
+        trainerNote: j['trainerNote'] as String? ?? '',
       );
 }
 
 class Program {
-  const Program(this.name, this.parts, {this.builtin = false});
+  const Program(this.name, this.parts, {this.builtin = false, this.trackMix = false});
   final String name;
   final List<ProgramPart> parts;
   final bool builtin;
+
+  /// Built from the songs: each song is its own part, in song order, and the
+  /// part length follows the song (see `MixController.startFromTracks`).
+  final bool trackMix;
   double get minutes => parts.fold(0, (a, p) => a + p.minutes);
 
   Program copyWith({String? name, List<ProgramPart>? parts}) =>
-      Program(name ?? this.name, parts ?? this.parts);
+      Program(name ?? this.name, parts ?? this.parts, trackMix: trackMix);
 
-  Map<String, Object?> toJson() => {'name': name, 'parts': [for (final p in parts) p.toJson()]};
+  Map<String, Object?> toJson() => {
+        'name': name,
+        'parts': [for (final p in parts) p.toJson()],
+        if (trackMix) 'trackMix': true,
+      };
 
-  factory Program.fromJson(Map<String, dynamic> j) => Program(j['name'] as String? ?? 'Program', [
-        for (final p in (j['parts'] as List? ?? [])) ProgramPart.fromJson(p as Map<String, dynamic>)
-      ]);
+  factory Program.fromJson(Map<String, dynamic> j) => Program(
+      j['name'] as String? ?? 'Program',
+      [for (final p in (j['parts'] as List? ?? [])) ProgramPart.fromJson(p as Map<String, dynamic>)],
+      trackMix: j['trackMix'] == true);
 }
 
 /// Whether [p] is one of a class's activities (not the warm-up, cool-down,
@@ -436,44 +452,6 @@ final classicProgram = Program(classicProgramName, const [
       music: true),
 ]);
 
-Program _intervals(String name, int minutes, int rounds, double climbMin, double sprintMin) {
-  const warm = ProgramPart('Warm-up', 5, 80, 90, maxStddev: 8);
-  const cool = ProgramPart('Cool-down', 5, 60, 70);
-  // Each round swaps in different activities so no two rounds repeat.
-  final climbs = [
-    ProgramPart('Climb', climbMin, 60, 70, maxStddev: 6),
-    ProgramPart('Hill Climb', climbMin, 60, 90, role: PartRole.hillClimb),
-    // one short song (see partQuery)
-    const ProgramPart('Half & Half', 3, 70, 85, role: PartRole.halfAndHalf),
-    ProgramPart('Stand-Sit-Hover', climbMin, 60, 75, role: PartRole.standSitHover),
-  ];
-  final sprints = [
-    ProgramPart('Sprint', sprintMin, 90, 105),
-    ProgramPart('Tabata', sprintMin, 90, 110, role: PartRole.tabata, variant: '20-10'),
-    ProgramPart('Pyramid', sprintMin, 85, 105, role: PartRole.pyramid),
-    ProgramPart('Surge', sprintMin, 90, 110, role: PartRole.surge),
-  ];
-  return Program(name, [
-    warm,
-    ...layoutMainBlock([
-      for (var i = 0; i < rounds; i++) ...[
-        climbs[i % climbs.length],
-        sprints[i % sprints.length],
-      ],
-    ],
-        minutes: minutes - warm.minutes - cool.minutes,
-        recovery: (m) => ProgramPart('Recovery', m, 70, 85, role: PartRole.recovery)),
-    cool,
-  ], builtin: true);
-}
-
-final builtinPrograms = [
-  Program(classicProgramName, classicProgram.parts, builtin: true),
-  _intervals('30 min intervals', 30, 2, 5, 3),
-  _intervals('45 min intervals', 45, 3, 5, 3),
-  _intervals('60 min intervals', 60, 4, 6, 3),
-];
-
 /// Search for one part on top of [base] (the Mix filters for the part's
 /// role): its RPM range matched against song BPM, also half and double time.
 SongQuery partQuery(ProgramPart p, SongQuery base,
@@ -540,7 +518,9 @@ String buildClassSheet(String name, List<Song> mix,
     List<int?>? parts,
     DateTime? date,
     int baseGear = 12,
-    Map<String, String> notes = const {}}) {
+    Map<String, String> notes = const {},
+    Map<String, List<StepSegment>> manualSegments = const {},
+    Map<String, List<TimedNote>> timedNotes = const {}}) {
   int? partOf(int i) {
     final pi = parts != null && i < parts.length ? parts[i] : null;
     return program != null && pi != null && pi >= 0 && pi < program.parts.length ? pi : null;
@@ -600,6 +580,7 @@ String buildClassSheet(String name, List<Song> mix,
       b.writeln('<h2>${_esc(p.name)} — ${_rpm(p.minRpm, p.maxRpm)}, '
           '${p.minutes.toStringAsFixed(1)} min</h2>');
       if (p.execution.isNotEmpty) b.writeln('<p class="exec">${_esc(p.execution)}</p>');
+      if (p.trainerNote.isNotEmpty) b.writeln('<p class="note">📝 ${_esc(p.trainerNote)}</p>');
     }
     b.writeln('<table><thead><tr><th>#</th><th>Start</th><th>Song</th><th>BPM</th>'
         '<th>Length</th></tr></thead>');
@@ -614,19 +595,24 @@ String buildClassSheet(String name, List<Song> mix,
     do {
       final s = mix[i];
       final bpm = s.medianBpm == null ? '-' : s.medianBpm!.round().toString();
-      final segs = plans?[i - runStart].segments;
+      final segs = manualSegments[s.path] ?? plans?[i - runStart].segments;
       final cues = segs == null || segs.length < 2
           ? ''
           : '<ul class="cues">${[
               for (final g in segs)
                 '<li>${_clock(g.start)} ${_esc(g.label)} · ${_rpm(g.minRpm, g.maxRpm)}'
-                    '${g.gear == null ? '' : ' · Gear ${absoluteGear(p!.baseGear ?? baseGear, g.gear!)}'}'
-                    '${g.cue == null ? '' : ' <span class="cue">— ${_esc(g.cue!)}</span>'}</li>'
+                    '${g.gear == null ? '' : ' · Gear ${absoluteGear(p?.baseGear ?? baseGear, g.gear!)}'}'
+                    '${g.cue == null ? '' : ' <span class="cue">— ${_esc(g.cue!)}</span>'}'
+                    '${g.note == null || g.note!.isEmpty ? '' : ' <span class="note">📝 ${_esc(g.note!)}</span>'}</li>'
             ].join()}</ul>';
       final note = notes[s.path];
       final noteHtml = note == null || note.isEmpty ? '' : '<div class="note">💬 ${_esc(note)}</div>';
+      final timed = timedNotes[s.path] ?? const <TimedNote>[];
+      final timedHtml = timed.isEmpty
+          ? ''
+          : '<ul class="cues">${[for (final n in timed) '<li>${_clock(n.at)} <span class="note">📝 ${_esc(n.text)}</span></li>'].join()}</ul>';
       b.writeln('<tbody class="song"><tr><td>${i + 1}</td><td>${_clock(t)}</td>'
-          '<td>${_esc(s.display)}$noteHtml$cues</td><td>$bpm</td>'
+          '<td>${_esc(s.display)}$noteHtml$cues$timedHtml</td><td>$bpm</td>'
           '<td>${s.playSeconds == null ? '' : _clock(s.playSeconds!)}</td></tr></tbody>');
       t += s.playSeconds ?? 0;
       i++;

@@ -4,6 +4,7 @@ import 'package:provider/provider.dart';
 import '../services/app_state.dart';
 import '../services/song_models.dart';
 import 'browse_screens.dart';
+import 'with_player.dart';
 
 /// Songs still to look at: for each of the four kinds, those neither found
 /// nor looked up yet.
@@ -238,7 +239,7 @@ class _CoverageTabState extends State<CoverageTab> {
           for (final g in list)
             _Row(g.name, g.songs, g.coverage, CoverageScope(genre: g.name),
                 () => Navigator.push(context,
-                    MaterialPageRoute(builder: (_) => GenreDetailScreen(genre: g.name)))),
+                    playerRoute(builder: (_) => GenreDetailScreen(genre: g.name)))),
           if (none.songs > 0 && (f.trim().isEmpty || 'no genre'.contains(f.trim().toLowerCase())))
             _Row('(no genre)', none.songs, none, const CoverageScope(noGenre: true), null),
         ];

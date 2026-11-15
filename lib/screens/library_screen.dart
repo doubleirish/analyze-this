@@ -7,9 +7,12 @@ import '../services/planner.dart';
 import 'package:shared_core/shared_core.dart';
 import 'duplicates_screen.dart';
 import 'browse_screens.dart';
+import 'duplicate_cleanup.dart';
 import 'bpm_fix_dialog.dart';
 import 'trim_dialog.dart';
 import 'mix_add.dart';
+import 'wishlist_view.dart';
+import 'with_player.dart';
 
 Future<void> playSong(BuildContext context, AppState s, String path) async {
   if (s.mode == PlayMode.mix && !s.mixer.mix.any((m) => m.path == path)) s.setMode(PlayMode.alphabetical);
@@ -439,9 +442,14 @@ class _LibraryTabState extends State<LibraryTab> {
                     label: Text(s.selecting ? 'Done selecting' : 'Select songs')),
                 TextButton.icon(
                     onPressed: () => Navigator.push(context,
-                        MaterialPageRoute(builder: (_) => const DuplicatesScreen())),
+                        playerRoute(builder: (_) => const DuplicatesScreen())),
                     icon: const Icon(Icons.content_copy),
                     label: const Text('Duplicates')),
+                TextButton.icon(
+                    onPressed: () => Navigator.push(context,
+                        playerRoute(builder: (_) => const WishlistPage())),
+                    icon: const Icon(Icons.playlist_add_check),
+                    label: const Text('Wish list')),
               ]),
               if (s.smartLists.isNotEmpty)
                 _chips('Saved searches:', [
@@ -524,8 +532,9 @@ class _LibraryTabState extends State<LibraryTab> {
 }
 
 class SongTile extends StatelessWidget {
-  const SongTile({super.key, required this.song});
+  const SongTile({super.key, required this.song, this.dupes = const []});
   final Song song;
+  final List<Song> dupes;
 
   @override
   Widget build(BuildContext context) {
@@ -563,6 +572,14 @@ class SongTile extends StatelessWidget {
       ].join('\n')),
       isThreeLine: true,
       trailing: Row(mainAxisSize: MainAxisSize.min, children: [
+        if (dupes.isNotEmpty)
+          IconButton(
+            tooltip: duplicateDetails(song, dupes),
+            icon: const Icon(Icons.content_copy, size: 16),
+            constraints: const BoxConstraints.tightFor(width: 28, height: 32),
+            padding: EdgeInsets.zero,
+            onPressed: () => showDuplicateDetails(context, song, dupes),
+          ),
         IconButton(
           tooltip: song.fav ? 'Remove from favourites' : 'Favourite',
           icon: Icon(song.fav ? Icons.favorite : Icons.favorite_border,

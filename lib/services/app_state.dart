@@ -17,14 +17,23 @@ import 'mixtape_export.dart';
 import 'phone_link.dart';
 import 'phone_sync.dart';
 import 'preview.dart';
+import 'relabel_controller.dart';
 import 'scanner.dart';
 import 'share.dart';
+import 'wishlist_controller.dart';
 
 class AppState extends PlaybackController {
-  AppState(this.db, {super.random}) : scanner = Scanner(db), super(appId: 'analyze_this');
+  AppState(this.db, {super.random}) : scanner = Scanner(db), super(appId: 'analyze_this') {
+    addTimedNote = (path, at, text) {
+      if (!mixer.mix.any((m) => m.path == path)) return false;
+      mixer.addTimedNote(path, at, text);
+      return true;
+    };
+  }
 
   final MusicDb db;
   final Scanner scanner;
+  late final WishlistController wishlist = WishlistController(db, scanner.net);
   String? previewing;
 
   /// The mix being built on the Mix tab (songs, parts, program, name, filters,
@@ -38,6 +47,9 @@ class AppState extends PlaybackController {
     isScanning: () => scanning,
     discography: _discography,
   );
+
+  /// MusicBrainz album matching and tag relabelling.
+  late final RelabelController relabel = RelabelController(db, scanner.mb);
 
   /// Artist photos and bulk cover-art downloads.
   late final ArtController artwork = ArtController(this, net: scanner.net);
@@ -77,8 +89,14 @@ class AppState extends PlaybackController {
 
   Future<void> load() async {
     folders = await db.folders();
-    browseBySongs = (await db.setting('browse_by_songs')) != '0';
+    final savedBrowseSort = await db.setting('browse_sort');
+    final legacySort = (await db.setting('browse_by_songs')) == '0'
+        ? BrowseSort.name
+        : BrowseSort.songs;
+    browseSort = BrowseSort.values.firstWhere(
+        (sort) => sort.name == savedBrowseSort, orElse: () => legacySort);
     hideUpTo = int.tryParse(await db.setting('hide_up_to') ?? '') ?? 0;
+    hideBestOf = (await db.setting('hide_best_of')) == '1';
     await mixer.loadPrograms();
     await mixer.loadMixFilters();
     await mixer.loadGeneratorBookends();
@@ -184,15 +202,22 @@ class AppState extends PlaybackController {
     }
   }
 
-  /// Artists/Albums tabs: most songs first (else by name), and hide entries
-  /// with [hideUpTo] songs or fewer (0 = show all).
-  bool browseBySongs = true;
+  /// Artists/Albums tabs: sorting and hiding entries with [hideUpTo] songs or
+  /// fewer (0 = show all).
+  BrowseSort browseSort = BrowseSort.songs;
   int hideUpTo = 0;
 
-  Future<void> setBrowse({bool? bySongs, int? hide}) async {
-    if (bySongs != null) {
-      browseBySongs = bySongs;
-      await db.setSetting('browse_by_songs', bySongs ? '1' : '0');
+  /// Hides the synthetic "Best of" albums from the Albums tab and artist pages.
+  bool hideBestOf = false;
+
+  Future<void> setBrowse({BrowseSort? sort, int? hide, bool? hideBest}) async {
+    if (hideBest != null) {
+      hideBestOf = hideBest;
+      await db.setSetting('hide_best_of', hideBest ? '1' : '0');
+    }
+    if (sort != null) {
+      browseSort = sort;
+      await db.setSetting('browse_sort', sort.name);
     }
     if (hide != null) {
       hideUpTo = hide;
@@ -433,8 +458,9 @@ class AppState extends PlaybackController {
 
   /// Albums/EPs by [artist] that aren't in the library, oldest first.
   /// Null when Deezer doesn't know the artist; throws if unreachable.
-  Future<List<AlbumRelease>?> missingAlbumsFor(String artist, Iterable<String> ownedAlbums) async {
-    final r = await (await _discography()).releases(artist);
+  Future<List<AlbumRelease>?> missingAlbumsFor(String artist, Iterable<String> ownedAlbums,
+      {bool refresh = false}) async {
+    final r = await (await _discography()).releases(artist, refresh: refresh);
     return r == null ? null : missingAlbums(r, ownedAlbums);
   }
 
@@ -662,13 +688,60 @@ class AppState extends PlaybackController {
 
   /// Removes the song from the library and deletes its file and sidecars from disk.
   Future<void> deleteSongFile(Song s) async {
-    for (final suffix in ['', '.bpm', '.lrc', '.wave', '.enrich']) {
+    final audio = File(s.path);
+    if (await audio.exists()) await audio.delete();
+    for (final suffix in ['.bpm', '.lrc', '.wave', '.enrich']) {
       try {
         final f = File('${s.path}$suffix');
         if (await f.exists()) await f.delete();
       } catch (_) {}
     }
     await removeFromLibrary(s);
+  }
+
+  /// Deletes only confirmed, still-damaged copies with an unchanged, present
+  /// healthy replacement in this selection. Healthy copies are never removed.
+  Future<int> cleanDuplicates(Iterable<Song> songs) async {
+    final approved = damagedDuplicateCopies(songs).map((s) => s.path).toSet();
+    final current = <Song>[];
+    for (final s in songs) {
+      final fresh = await db.song(s.path);
+      if (fresh != null && fresh.size == s.size && fresh.mtime == s.mtime) current.add(fresh);
+    }
+    var deleted = 0;
+    for (final copies in groupDuplicates(current)) {
+      final healthy = copies.songs.where((s) => !s.damaged);
+      final keepPaths = <String>{};
+      for (final s in healthy) {
+        final f = File(s.path);
+        final stat = await f.stat();
+        if (stat.type != FileSystemEntityType.file ||
+            stat.size != s.size ||
+            stat.modified.millisecondsSinceEpoch != s.mtime) {
+          continue;
+        }
+        if ((await quickCheckFile(s.path)).damaged) continue;
+        final canonical = await f.resolveSymbolicLinks();
+        keepPaths.add(Platform.isWindows ? canonical.toLowerCase() : canonical);
+      }
+      if (keepPaths.isEmpty) continue;
+      for (final s in copies.songs.where((s) => s.damaged && approved.contains(s.path))) {
+        final f = File(s.path);
+        final stat = await f.stat();
+        if (stat.type != FileSystemEntityType.file ||
+            stat.size != s.size ||
+            stat.modified.millisecondsSinceEpoch != s.mtime) {
+          continue;
+        }
+        final canonical = await f.resolveSymbolicLinks();
+        if (keepPaths.contains(Platform.isWindows ? canonical.toLowerCase() : canonical)) continue;
+        await deleteSongFile(s);
+        deleted++;
+      }
+    }
+    await damage.load();
+    await mixer.refreshDamaged();
+    return deleted;
   }
 
   Future<void> removeFromLibrary(Song s) async {
@@ -685,7 +758,28 @@ class AppState extends PlaybackController {
   }
 
   @override
-  List<String> get libraryPaths => [for (final s in results) s.path];
+  List<String> get libraryPaths => [
+    for (final s in resolveDuplicates(_playableCopies(results))) s.path,
+  ];
+
+  Iterable<Song> _playableCopies(Iterable<Song> songs) => songs.where(
+    (s) => (!Platform.isAndroid || s.androidNative) && File(s.path).existsSync(),
+  );
+
+  @override
+  Future<void> play(String path) async {
+    if (mode != PlayMode.mix || mixer.mix.isEmpty) {
+      final selected = results.where((s) => s.path == path).firstOrNull;
+      for (final copies in groupDuplicates(_playableCopies(results))) {
+        if (copies.songs.any((s) => s.path == path) ||
+            (selected != null && groupDuplicates([selected, copies.best]).length == 1)) {
+          path = copies.best.path;
+          break;
+        }
+      }
+    }
+    await super.play(path);
+  }
 
   @override
   List<String> get mixPaths => mixer.paths;
@@ -698,6 +792,10 @@ class AppState extends PlaybackController {
     if (i < 0) return super.planOf(path);
     return mixer.planAt(i, fallbackSeconds: tempos[path]?.durationSec);
   }
+
+  @override
+  Future<List<TimedNote>> timedNotesOf(String path) async =>
+      mixer.timedNotes[path] ?? await super.timedNotesOf(path);
 
   @override
   Future<String?> noteOf(String path) async => mixer.songNotes[path] ?? await super.noteOf(path);
@@ -722,7 +820,8 @@ class AppState extends PlaybackController {
 
   /// Plays [songs] in the given order (or shuffled), replacing the queue.
   Future<void> playSongList(List<Song> songs, {bool shuffle = false}) =>
-      playSongs([for (final s in songs) s.path], shuffle: shuffle);
+      playSongs([for (final s in resolveDuplicates(_playableCopies(songs))) s.path],
+          shuffle: shuffle);
 
   @override
   void dispose() {
@@ -731,6 +830,7 @@ class AppState extends PlaybackController {
     mixer.dispose();
     health.dispose();
     artwork.dispose();
+    wishlist.dispose();
     super.dispose();
   }
 }

@@ -5,7 +5,7 @@ import 'package:flutter/painting.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shared_core/shared_core.dart';
 
-/// Artist photos (Deezer, cached on disk) and bulk cover-art downloads.
+/// Artist photos (Deezer first, then other online sources; cached on disk) and bulk cover-art downloads.
 /// A single album cover is fetched by [PlaybackController.downloadAlbumArt],
 /// so the player's own art widgets see it too.
 class ArtController extends ChangeNotifier {
@@ -29,7 +29,7 @@ class ArtController extends ChangeNotifier {
         ArtistArt(Directory('${dir.path}${Platform.pathSeparator}artist_art'), net: net);
   }
 
-  /// Loads an artist's photo into [artistImages] (disk cache first, then Deezer).
+  /// Loads an artist's photo into [artistImages] (disk cache first, then online sources).
   Future<void> ensureArtistImage(String artist) async {
     final k = ArtistArt.keyFor(artist);
     if (k.isEmpty || artistBusy.contains(k) ||
@@ -50,7 +50,7 @@ class ArtController extends ChangeNotifier {
     }
   }
 
-  /// Forces a Deezer photo lookup, retrying artists previously remembered as a miss.
+  /// Forces an online photo lookup, retrying artists previously remembered as a miss.
   Future<bool> downloadArtistPhoto(String artist) async {
     final k = ArtistArt.keyFor(artist);
     if (k.isEmpty || !artistBusy.add(k)) return false;
@@ -110,7 +110,7 @@ class ArtController extends ChangeNotifier {
           if (bytes != null && listEquals(bytes, candidate)) continue;
           return art.setFromBytes(artist, candidate);
         }
-        throw StateError('Deezer has no different matching artist photo. Choose an album cover instead.');
+        throw StateError('No other matching artist photo was found online. Choose an album cover instead.');
       });
 
   Future<void> resetArtistPhoto(String artist) =>
@@ -121,25 +121,28 @@ class ArtController extends ChangeNotifier {
         return null;
       });
 
-  /// Bulk download status, e.g. "Album art 3/20"; null when idle.
-  String? artProgress;
+  /// Bulk album-art download status, e.g. "Album art 3/20"; null when idle.
+  String? albumArtProgress;
+
+  /// Bulk artist-photo download status; a separate job from [albumArtProgress].
+  String? artistPhotoProgress;
 
   bool hasEmbeddedArt(String samplePath) => playback.media[samplePath]?.art != null;
 
   /// Downloads art for every album in [samples] (a song path per album) that has none.
   Future<int> downloadMissingAlbumArt(List<String> samples) async {
-    if (artProgress != null) return 0;
+    if (albumArtProgress != null) return 0;
     var found = 0, i = 0;
     try {
       for (final p in samples) {
-        artProgress = 'Album art ${++i}/${samples.length}';
+        albumArtProgress = 'Album art ${++i}/${samples.length}';
         notifyListeners();
         await playback.ensureMedia(p);
         if (hasEmbeddedArt(p)) continue;
         if (await playback.downloadAlbumArt(p)) found++;
       }
     } finally {
-      artProgress = null;
+      albumArtProgress = null;
       notifyListeners();
     }
     return found;
@@ -147,17 +150,17 @@ class ArtController extends ChangeNotifier {
 
   /// Retries the photo of every artist in [names] that has none.
   Future<int> downloadMissingArtistPhotos(List<String> names) async {
-    if (artProgress != null) return 0;
+    if (artistPhotoProgress != null) return 0;
     var found = 0, i = 0;
     try {
       for (final n in names) {
-        artProgress = 'Artist photos ${++i}/${names.length}';
+        artistPhotoProgress = 'Artist photos ${++i}/${names.length}';
         notifyListeners();
         if (artistImages[ArtistArt.keyFor(n)] != null) continue;
         if (await downloadArtistPhoto(n)) found++;
       }
     } finally {
-      artProgress = null;
+      artistPhotoProgress = null;
       notifyListeners();
     }
     return found;

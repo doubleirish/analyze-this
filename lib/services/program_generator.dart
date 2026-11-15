@@ -27,34 +27,6 @@ enum ClassStyle {
 
 enum Intensity { easy, moderate, hard }
 
-/// Fixed built-in programs: each themed style at 30/45/55 min, plus two
-/// differently seeded mixed programs per length. Seeds are fixed so the
-/// programs are identical on every launch.
-final themedBuiltins = () {
-  const lengths = [30, 45, 55];
-  const themes = [
-    ClassStyle.aerobic,
-    ClassStyle.fartlek,
-    ClassStyle.sweetSpot,
-    ClassStyle.tabata,
-    ClassStyle.strength,
-    ClassStyle.speed,
-  ];
-  Program build(ClassStyle s, int m, int seed, String name) {
-    final p = generateProgram(minutes: m, style: s, random: Random(seed));
-    return Program(name, p.parts, builtin: true);
-  }
-
-  return [
-    for (final m in lengths)
-      for (final s in themes)
-        build(s, m, m * 31 + s.index, '${s == ClassStyle.tabata ? 'Tabata / HIIT' : s.label} · $m min'),
-    for (final m in lengths)
-      for (var v = 0; v < 2; v++)
-        build(ClassStyle.mixed, m, m * 17 + v * 101 + 7, 'Mixed ${'AB'[v]} · $m min'),
-  ];
-}();
-
 const minGeneratedMinutes = 20;
 const maxGeneratedMinutes = 75;
 

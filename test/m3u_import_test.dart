@@ -122,4 +122,45 @@ void main() {
     expect(r.matched, 0);
     expect(m.canUndo, isFalse);
   });
+
+  test('pasted artist/title list imports healthy matches and reports skipped lines', () async {
+    await db.upsertSong(Song(path: 'good.mp3', artist: 'Band', title: 'Track'));
+    await db.upsertSong(Song(path: 'damaged.mp3', artist: 'Band', title: 'Broken'));
+    await db.upsertSong(Song(path: 'live.mp3', artist: 'Band', title: 'Other (Live)'));
+    await db.addTag('damaged.mp3', corruptTag);
+    final m = MixController(db);
+    m.addToMix((await db.song(r'C:\Music\Exact.mp3'))!);
+    final r = await m.importTrackList(
+        '1. Band - Track\nBand - Broken\nBand - Other\nBand - Missing\nBand - Track\n');
+    expect(paths(m), ['good.mp3']);
+    expect(r.total, 5);
+    expect(r.matched, 1);
+    expect(r.skipped.map((s) => s.reason), [
+      M3uSkipReason.damaged,
+      M3uSkipReason.ambiguousTrack,
+      M3uSkipReason.notFound,
+      M3uSkipReason.duplicate,
+    ]);
+    m.undo();
+    expect(paths(m), [r'C:\Music\Exact.mp3']);
+  });
+
+  test('pasted track list can append and no matches leave mix unchanged', () async {
+    await db.upsertSong(Song(path: 'good.mp3', artist: 'Band', title: 'Track'));
+    final m = MixController(db);
+    m.addToMix((await db.song(r'C:\Music\Exact.mp3'))!);
+    final key = m.mixKey;
+    await m.importTrackList('"Track" by Band', replace: false);
+    expect(paths(m), [r'C:\Music\Exact.mp3', 'good.mp3']);
+    expect(m.mixKey, key);
+    await m.importTrackList('Band - Missing', replace: true);
+    expect(paths(m), [r'C:\Music\Exact.mp3', 'good.mp3']);
+  });
+
+  test('pasted M3U matches absolute paths and relative filenames without a base directory', () async {
+    final m = MixController(db);
+    final r = await m.importPlaylist('#EXTM3U\nC:\\Music\\Exact.mp3\nMoved.mp3\n');
+    expect(r.matched, 2);
+    expect(paths(m), [r'C:\Music\Exact.mp3', r'D:\Old\Moved.mp3']);
+  });
 }

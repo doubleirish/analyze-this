@@ -432,7 +432,7 @@ class Scanner {
     final t = await readTags(p);
     final ov = await db.override(p);
     final artist = (ov?['artist'] as String?) ?? t.artist;
-    final title = t.title;
+    final title = (ov?['title'] as String?) ?? t.title;
     await db.upsertSong(
       Song(
         path: p,
@@ -956,7 +956,7 @@ class Scanner {
       await db.setBpmFix(path, scale: fix.scale, bpm: fix.bpm);
     }
     final stats = TempoStats.of(tempo?.mapFor(baselineId));
-    final title = same ? old.title : tags!.title;
+    final title = (ov?['title'] as String?) ?? (same ? old.title : tags!.title);
     final artist = (ov?['artist'] as String?) ?? (same ? old.artist : tags!.artist);
     final album = (ov?['album'] as String?) ?? (same ? old.album : tags!.album);
     final year = (ov?['year'] as int?) ?? (same ? old.year : tags!.year);

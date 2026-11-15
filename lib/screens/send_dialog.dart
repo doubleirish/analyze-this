@@ -80,11 +80,6 @@ class _SendToPhoneDialogState extends State<SendToPhoneDialog> {
   String _preset = TranscodePreset.autoId;
   bool _showMore = false;
 
-  // Facts about the mix's files.
-  int _bytes = 0;
-  final List<String> _missing = [];
-  final List<String> _unplayable = [];
-
   String? _adb;
   List<AdbDevice> _usb = [];
   bool _usbChecked = false;
@@ -127,16 +122,6 @@ class _SendToPhoneDialogState extends State<SendToPhoneDialog> {
   }
 
   Future<void> _init() async {
-    for (final song in s.mixer.mix) {
-      if (widget.albumsOnly) break;
-      final f = File(song.path);
-      if (!f.existsSync()) {
-        _missing.add(p.basename(song.path));
-        continue;
-      }
-      _bytes += f.lengthSync();
-      if (!androidPlayable(song.path)) _unplayable.add(p.basename(song.path));
-    }
     final db = s.db;
     Map<String, dynamic> pref = {};
     for (final k in [
@@ -257,44 +242,78 @@ class _SendToPhoneDialogState extends State<SendToPhoneDialog> {
 
     int? estimate;
     if (!widget.albumsOnly) {
-      if (s.mixer.mix.isEmpty) add(_Level.error, 'The mix is empty.');
-      if (_missing.isNotEmpty) {
-        add(_Level.error,
-            '${_missing.length} song file(s) are missing on this PC: ${_missing.take(3).join(', ')}'
-            '${_missing.length > 3 ? '…' : ''}. Remove them from the mix or rescan.');
+      final selected = await _export.selections();
+      if (gen != _gen || !mounted) return;
+      var bytes = 0;
+      final missing = <String>[], unplayable = <String>[];
+      for (final entry in selected) {
+        final stat = await File(entry.file.path).stat();
+        if (stat.type != FileSystemEntityType.file) {
+          missing.add(p.basename(entry.file.path));
+          continue;
+        }
+        bytes += stat.size;
+        if (!androidPlayable(entry.file.path)) unplayable.add(p.basename(entry.file.path));
       }
-      final damaged = s.mixer.damagedIndexes;
+      if (s.mixer.mix.isEmpty) add(_Level.error, 'The mix is empty.');
+      if (missing.isNotEmpty) {
+        add(
+          _Level.error,
+          '${missing.length} song file(s) are missing on this PC: ${missing.take(3).join(', ')}'
+          '${missing.length > 3 ? '…' : ''}. Remove them from the mix or rescan.',
+        );
+      }
+      final substitutions = selected.where((e) => e.substituted).length;
+      final retained = selected.where((e) => !e.substituted && e.healthyNative).length;
+      add(
+        _Level.info,
+        '$substitutions Android-friendly duplicate substitution(s); '
+        '$retained healthy Android-compatible original(s) retained. Saved mix unchanged.',
+      );
+      final damaged = selected.where((e) => e.file.damaged).toList();
       if (damaged.isNotEmpty) {
-        final eg = damaged.take(2).map((i) => s.mixer.mix[i].title ?? p.basename(s.mixer.mix[i].path)).join(', ');
-        add(_Level.warn,
-            '${damaged.length} song(s) have damaged audio ($eg) and may skip or stop on the phone. '
-            'Close this and use “Replace all” above the mix to swap in similar songs.');
+        final eg = damaged.take(2).map((e) => e.original.title ?? p.basename(e.file.path)).join(', ');
+        add(
+          _Level.warn,
+          '${damaged.length} song(s) have damaged audio ($eg) and may skip or stop on the phone. '
+          'Close this and use “Replace all” above the mix to swap in similar songs.',
+        );
       }
       final explicit = s.mixer.explicitInMix;
       if (explicit.isNotEmpty && s.mixer.cleanClass) {
-        add(_Level.warn,
-            'Clean class is on but ${explicit.length} song(s) are explicit: '
-            '${explicit.take(3).map((m) => m.display).join(', ')}${explicit.length > 3 ? '…' : ''}.');
+        add(
+          _Level.warn,
+          'Clean class is on but ${explicit.length} song(s) are explicit: '
+          '${explicit.take(3).map((m) => m.display).join(', ')}${explicit.length > 3 ? '…' : ''}.',
+        );
       }
       final hasFfmpeg = _ffmpegPath.isNotEmpty;
       final converting = _preset != 'copy' && _preset != TranscodePreset.autoId;
       if (converting && !hasFfmpeg) {
         add(_Level.error, 'Converting needs ffmpeg. Set its path under Advanced, or choose Auto.');
-      } else if (_unplayable.isNotEmpty) {
-        final eg = _unplayable.take(2).join(', ');
+      } else if (unplayable.isNotEmpty) {
+        final eg = unplayable.take(2).join(', ');
         if (_preset == TranscodePreset.autoId && hasFfmpeg) {
-          add(_Level.ok, '${_unplayable.length} song(s) Android can’t play ($eg) will be converted to AAC.');
+          add(_Level.ok, '${unplayable.length} song(s) Android can’t play ($eg) will be converted to AAC.');
         } else if (!converting) {
-          add(_Level.warn,
-              '${_unplayable.length} song(s) won’t play on Android ($eg). '
-              '${hasFfmpeg ? 'Choose Auto under Advanced to convert them.' : 'Install ffmpeg (or set its path under Advanced) so Auto can convert them.'}');
+          add(
+            _Level.warn,
+            '${unplayable.length} song(s) won’t play on Android ($eg). '
+            '${hasFfmpeg ? 'Choose Auto under Advanced to convert them.' : 'Install ffmpeg (or set its path under Advanced) so Auto can convert them.'}',
+          );
         }
       }
-      estimate = converting ? null : _bytes;
-      add(_Level.info, '${s.mixer.mix.length} songs, about ${formatBytes(_bytes)}'
-          '${converting ? ' before converting' : ''}.');
+      estimate = converting ? null : bytes;
+      add(
+        _Level.info,
+        '${selected.length} songs, about ${formatBytes(bytes)}'
+        '${converting ? ' before converting' : ''}.',
+      );
     } else {
-      add(_Level.info, 'Metadata only: every album in the database, with tag-based track counts. No audio files.');
+      add(
+        _Level.info,
+        'Metadata only: every album in the database, with tag-based track counts. No audio files.',
+      );
     }
 
     try {
@@ -309,8 +328,11 @@ class _SendToPhoneDialogState extends State<SendToPhoneDialog> {
             add(_Level.error, 'This PC isn’t connected to a network.');
           } else {
             add(_Level.ok, 'The phone will connect to ${ips.first}. It must be on the same Wi-Fi.');
-            add(_Level.info, 'If the phone can’t connect, allow analyze-this through Windows Firewall '
-                '(Private networks) when Windows asks, or under Settings › Firewall › Allow an app.');
+            add(
+              _Level.info,
+              'If the phone can’t connect, allow analyze-this through Windows Firewall '
+              '(Private networks) when Windows asks, or under Settings › Firewall › Allow an app.',
+            );
           }
         case Transport.zip:
           add(_Level.info, 'You’ll choose where to save the .beatsmix file.');

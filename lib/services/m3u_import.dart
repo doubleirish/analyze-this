@@ -85,6 +85,8 @@ enum M3uMatchKind { exact, normalized, fileName }
 enum M3uSkipReason {
   notFound('not in the library'),
   ambiguous('several library files have this name'),
+  ambiguousTrack('track match needs review'),
+  damaged('all matching copies are marked damaged'),
   stream('not a local file'),
   duplicate('already earlier in the playlist');
 

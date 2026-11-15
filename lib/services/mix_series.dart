@@ -66,6 +66,8 @@ extension MixSeries on MixController {
         clearMix();
         lockedPaths = {};
         songNotes = {};
+        songSegments = {};
+        timedNotes = {};
         _seriesUsed = used;
         await fillProgram(t);
         _edit(() {

@@ -28,6 +28,23 @@ import 'browse_screens.dart';
 import 'class_history.dart';
 import 'tempo_profile.dart';
 import 'mix_add.dart';
+import 'segment_editor.dart';
+import 'annotate_player.dart';
+import 'playlist_text_dialog.dart';
+import 'with_player.dart';
+import '../services/mix_csv.dart';
+
+/// The top-level ways of working on the Mix page; each shows only its panels.
+enum _Opt {
+  last('Load last mix', Icons.history),
+  tracks('Create from tracks', Icons.queue_music),
+  programs('Create from programs', Icons.view_list),
+  io('Import / Export / Send to phone', Icons.ios_share);
+
+  const _Opt(this.label, this.icon);
+  final String label;
+  final IconData icon;
+}
 
 class MixTab extends StatefulWidget {
   const MixTab({super.key});
@@ -39,6 +56,12 @@ class MixTab extends StatefulWidget {
 class _MixTabState extends State<MixTab> {
   final _name = TextEditingController();
   final _list = ScrollController();
+
+  /// Remembered while the app runs so switching tabs keeps the choice.
+  static _Opt? _remembered;
+  _Opt? _opt = _remembered;
+
+  void _choose(_Opt? o) => setState(() => _opt = _remembered = o);
 
   /// Song picked on the energy graph; highlighted in the list.
   int? _selected;
@@ -113,11 +136,21 @@ class _MixTabState extends State<MixTab> {
         Icon(iconForKey(roleIconKey(p.kind)), size: 18),
         const SizedBox(width: 6),
         Expanded(
-          child: Text(
-            '${p.name} · ${p.minRpm.round()}–${p.maxRpm.round()} RPM',
-            overflow: TextOverflow.ellipsis,
-            maxLines: 2,
-          ),
+          child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+            Text(
+              '${p.name} · ${p.minRpm.round()}–${p.maxRpm.round()} RPM',
+              overflow: TextOverflow.ellipsis,
+              maxLines: 2,
+            ),
+            if (p.trainerNote.isNotEmpty)
+              Text(
+                '📝 ${p.trainerNote}',
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: Theme.of(context).textTheme.bodySmall?.copyWith(
+                    fontStyle: FontStyle.italic, color: Theme.of(context).colorScheme.tertiary),
+              ),
+          ]),
         ),
       ],
     );
@@ -227,7 +260,7 @@ class _MixTabState extends State<MixTab> {
     );
     if (p == null) return;
     await nav.push(
-      MaterialPageRoute(builder: (_) => ProgramScreen(initial: p)),
+      playerRoute(builder: (_) => ProgramScreen(initial: p)),
     );
   }
 
@@ -386,12 +419,35 @@ class _MixTabState extends State<MixTab> {
 
   Future<void> _importPlaylist(MixController s) async {
     final messenger = ScaffoldMessenger.of(context);
-    final pick = await FilePicker.pickFiles(
-        dialogTitle: 'Import playlist',
-        type: FileType.custom,
-        allowedExtensions: ['m3u', 'm3u8']);
-    final path = pick.isEmpty ? null : pick.first.path;
-    if (path == null || !mounted) return;
+    final paste = await showDialog<bool>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('Import playlist'),
+        content: const Text('Choose a playlist file or paste a list of tracks or M3U text.'),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          OutlinedButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Choose file')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Paste text')),
+        ],
+      ),
+    );
+    if (paste == null || !mounted) return;
+    String? path;
+    PlaylistText? input;
+    if (paste) {
+      input = await showDialog<PlaylistText>(
+        context: context,
+        builder: (_) => const PlaylistTextDialog(),
+      );
+      if (input == null || !mounted) return;
+    } else {
+      final pick = await FilePicker.pickFiles(
+          dialogTitle: 'Import playlist',
+          type: FileType.custom,
+          allowedExtensions: ['m3u', 'm3u8']);
+      path = pick.isEmpty ? null : pick.first.path;
+      if (path == null || !mounted) return;
+    }
     var replace = true;
     if (s.mix.isNotEmpty) {
       final choice = await showDialog<bool>(
@@ -412,11 +468,17 @@ class _MixTabState extends State<MixTab> {
     }
     final M3uImportResult r;
     try {
-      final file = File(path);
-      final text = decodePlaylist(await file.readAsBytes(),
-          m3u8: path.toLowerCase().endsWith('.m3u8'));
-      final name = file.uri.pathSegments.last.replaceFirst(RegExp(r'\.m3u8?$', caseSensitive: false), '');
-      r = await s.importPlaylist(text, baseDir: file.parent.path, replace: replace, name: name);
+      if (input != null) {
+        r = input.format == PlaylistTextFormat.tracks
+            ? await s.importTrackList(input.text, replace: replace)
+            : await s.importPlaylist(input.text, replace: replace);
+      } else {
+        final file = File(path!);
+        final text = decodePlaylist(await file.readAsBytes(),
+            m3u8: path.toLowerCase().endsWith('.m3u8'));
+        final name = file.uri.pathSegments.last.replaceFirst(RegExp(r'\.m3u8?$', caseSensitive: false), '');
+        r = await s.importPlaylist(text, baseDir: file.parent.path, replace: replace, name: name);
+      }
     } catch (e) {
       messenger.showSnackBar(SnackBar(content: Text('Could not read the playlist: $e')));
       return;
@@ -425,7 +487,7 @@ class _MixTabState extends State<MixTab> {
     if (r.skipped.isEmpty) {
       messenger.showSnackBar(SnackBar(
         content: Text(summary),
-        action: SnackBarAction(label: 'Undo', onPressed: s.undo),
+        action: r.matched == 0 ? null : SnackBarAction(label: 'Undo', onPressed: s.undo),
       ));
       return;
     }
@@ -471,6 +533,355 @@ class _MixTabState extends State<MixTab> {
     }
   }
 
+  MixInfo? _latestSaved(MixController s) {
+    MixInfo? best;
+    for (final m in s.savedMixes) {
+      if (best == null || (m.savedAt ?? 0) > (best.savedAt ?? 0)) best = m;
+    }
+    return best;
+  }
+
+  /// Makes each song in the current mix its own part, so the songs define the
+  /// shape of the class and exercises are chosen per song.
+  Future<void> _useTracks(MixController s) async {
+    if (s.mix.isEmpty) return;
+    s.startFromTracks(List.of(s.mix));
+  }
+
+  Future<void> _saveCsv(String title, String name, String csv) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final saved = await FilePicker.saveFile(
+      dialogTitle: title,
+      fileName: '$name.csv',
+      bytes: Uint8List.fromList(utf8.encode(csv)),
+      type: FileType.custom,
+      allowedExtensions: ['csv'],
+    );
+    if (saved == null) return;
+    messenger.showSnackBar(SnackBar(content: Text('Saved ${saved.toFilePath()}')));
+  }
+
+  Future<MixCsv?> _pickCsv(String title) async {
+    final messenger = ScaffoldMessenger.of(context);
+    final pick = await FilePicker.pickFiles(
+        dialogTitle: title, type: FileType.custom, allowedExtensions: ['csv']);
+    final path = pick.isEmpty ? null : pick.first.path;
+    if (path == null || !mounted) return null;
+    final MixCsv csv;
+    try {
+      csv = parseMixCsv(utf8.decode(await File(path).readAsBytes(), allowMalformed: true));
+    } catch (e) {
+      messenger.showSnackBar(SnackBar(content: Text('Could not read the file: $e')));
+      return null;
+    }
+    if (csv.errors.isNotEmpty) {
+      if (!mounted) return null;
+      final go = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: Text('${csv.errors.length} problem${csv.errors.length == 1 ? '' : 's'} in the file'),
+          content: SizedBox(
+            width: 560,
+            child: SingleChildScrollView(
+              child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+                for (final e in csv.errors) Text(e, style: const TextStyle(fontFamily: 'monospace')),
+              ]),
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('Cancel')),
+            if (csv.parts.isNotEmpty)
+              FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('Import the rest')),
+          ],
+        ),
+      );
+      if (go != true) return null;
+    }
+    if (csv.parts.isEmpty) {
+      messenger.showSnackBar(const SnackBar(content: Text('Nothing to import in that file')));
+      return null;
+    }
+    return csv;
+  }
+
+  Future<void> _importMixCsv(MixController s) async {
+    final csv = await _pickCsv('Import mix from CSV');
+    if (csv == null || !mounted) return;
+    if (!await confirmUnsavedMix(context, s, action: 'replace the mix')) return;
+    final library = await s.db.allSongs();
+    final r = s.applyCsv(csv, library);
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    if (r.missing.isEmpty) {
+      messenger.showSnackBar(SnackBar(
+        content: Text('Imported "${csv.name}": ${r.matched} songs'),
+        action: SnackBarAction(label: 'Undo', onPressed: s.undo),
+      ));
+      return;
+    }
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Imported ${r.matched} songs; ${r.missing.length} not in your library'),
+        content: SizedBox(
+          width: 560,
+          child: SingleChildScrollView(
+            child: Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
+              for (final m in r.missing) Text(m),
+            ]),
+          ),
+        ),
+        actions: [
+          TextButton(
+              onPressed: () {
+                s.undo();
+                Navigator.pop(ctx);
+              },
+              child: const Text('Undo')),
+          FilledButton(onPressed: () => Navigator.pop(ctx), child: const Text('OK')),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _importProgramCsv(MixController s) async {
+    final csv = await _pickCsv('Import program from CSV');
+    if (csv == null) return;
+    final p = csv.toProgram();
+    await s.saveProgram(p);
+    if (!mounted) return;
+    ScaffoldMessenger.of(context)
+        .showSnackBar(SnackBar(content: Text('Saved program "${p.name}" (${p.parts.length} parts)')));
+  }
+
+  Future<void> _partNoteDialog(MixController s, int part) async {
+    final p = s.program.parts[part];
+    final c = TextEditingController(text: p.trainerNote);
+    final v = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('Trainer note: ${p.name}', maxLines: 2, overflow: TextOverflow.ellipsis),
+        content: SizedBox(
+          width: 460,
+          child: TextField(
+            controller: c,
+            autofocus: true,
+            maxLines: 4,
+            minLines: 2,
+            decoration: const InputDecoration(
+                hintText: 'e.g. Remind them to check resistance before the first climb',
+                helperText: 'Shown on the class sheet and in class mode on the phone'),
+          ),
+        ),
+        actions: [
+          if (p.trainerNote.isNotEmpty)
+            TextButton(onPressed: () => Navigator.pop(ctx, ''), child: const Text('Remove')),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel')),
+          FilledButton(onPressed: () => Navigator.pop(ctx, c.text), child: const Text('Save')),
+        ],
+      ),
+    );
+    c.dispose();
+    if (v != null) s.setPartNote(part, v);
+  }
+
+  /// The panel for the chosen top-level option (extra to the shared controls).
+  Widget _panel(MixController s) {
+    final last = _latestSaved(s);
+    switch (_opt) {
+      case null:
+        return Text('Choose how to build this class.', style: Theme.of(context).textTheme.bodySmall);
+      case _Opt.last:
+        return Wrap(spacing: 12, runSpacing: 8, crossAxisAlignment: WrapCrossAlignment.center, children: [
+          FilledButton.icon(
+            onPressed: last == null ? null : () => _load(s, last),
+            icon: const Icon(Icons.history),
+            label: Text(last == null ? 'No saved mixes yet' : 'Load "${last.name}"'),
+          ),
+          ActionChip(
+            tooltip: 'Saved mixes',
+            avatar: const Icon(Icons.folder_open),
+            label: const Text('All saved mixes'),
+            onPressed: s.savedMixes.isEmpty
+                ? null
+                : () => Navigator.push(
+                      context,
+                      playerRoute(builder: (_) => SavedMixesScreen(onLoad: (m) => _load(s, m))),
+                    ),
+          ),
+          ActionChip(
+            tooltip: 'Log that you taught this mix (snapshots its songs)',
+            avatar: const Icon(Icons.event_available),
+            label: const Text('Mark as taught'),
+            onPressed: s.mix.isEmpty
+                ? null
+                : () => markAsTaught(context, mixId: s.mixDbId, mixName: s.mixName, paths: s.paths),
+          ),
+          ActionChip(
+            tooltip: 'Classes you have taught',
+            avatar: const Icon(Icons.history),
+            label: const Text('Class history'),
+            onPressed: () =>
+                showDialog<void>(context: context, builder: (_) => const ClassHistoryDialog()),
+          ),
+        ]);
+      case _Opt.tracks:
+        return Wrap(spacing: 12, runSpacing: 8, crossAxisAlignment: WrapCrossAlignment.center, children: [
+          FilledButton.tonalIcon(
+            onPressed: s.mix.isEmpty ? null : () => _useTracks(s),
+            icon: const Icon(Icons.queue_music),
+            label: Text(s.program.trackMix ? 'Songs define the class ✓' : 'Use these songs as the class'),
+          ),
+          FilledButton.tonalIcon(
+            onPressed: () => _importPlaylist(s),
+            icon: const Icon(Icons.playlist_add),
+            label: const Text('Import playlist…'),
+          ),
+          FilledButton.tonalIcon(
+            onPressed: () => _importMixCsv(s),
+            icon: const Icon(Icons.table_view),
+            label: const Text('Import mix CSV…'),
+          ),
+          OutlinedButton.icon(
+            onPressed: s.mix.isEmpty ? null : () => _suggest(s),
+            icon: const Icon(Icons.skip_next),
+            label: const Text('Suggest next'),
+          ),
+          OutlinedButton.icon(
+            onPressed: s.mix.isEmpty ? null : () => showSimilar(context, s.mix.last),
+            icon: const Icon(Icons.auto_awesome_motion),
+            label: const Text('More like last song'),
+          ),
+          Text(s.program.trackMix
+              ? 'Pick an exercise for each song below; swap and move songs freely.'
+              : 'Add songs from the Songs tab, then press the button.'),
+        ]);
+      case _Opt.programs:
+        return Wrap(spacing: 12, runSpacing: 8, crossAxisAlignment: WrapCrossAlignment.center, children: [
+          PopupMenuButton<Program>(
+            tooltip: 'Pick a program, then auto-fill it using the Mix filters below',
+            enabled: s.programs.isNotEmpty,
+            onSelected: s.selectProgram,
+            itemBuilder: (_) => [
+              for (final t in s.programs) PopupMenuItem(value: t, child: Text('${t.name} (${t.minutes.round()} min)')),
+            ],
+            child: Chip(
+              avatar: const Icon(Icons.view_list),
+              label: Text(s.programs.isEmpty ? 'No programs yet: generate or import one' : 'Program: ${s.program.name}'),
+            ),
+          ),
+          FilledButton.tonalIcon(
+            onPressed: s.programs.isEmpty && s.program.parts.isEmpty ? null : () => _fillDialog(s),
+            icon: const Icon(Icons.auto_awesome),
+            label: const Text('Auto-fill program'),
+          ),
+          OutlinedButton.icon(
+            onPressed: () => _generate(s),
+            icon: const Icon(Icons.auto_fix_high),
+            label: const Text('Generate program'),
+          ),
+          PopupMenuButton<PartRole>(
+            tooltip: 'Find warm-up, climb, sprint, recovery or cool-down music',
+            onSelected: (r) => _suggestRole(s, r),
+            itemBuilder: (_) => [
+              for (final r in PartRole.values)
+                if (r != PartRole.steady) PopupMenuItem(value: r, child: Text(r.label)),
+            ],
+            child: const Chip(avatar: Icon(Icons.queue_music), label: Text('Music for…')),
+          ),
+          OutlinedButton.icon(
+            onPressed: () => Navigator.push(context, playerRoute(builder: (_) => const ProgramScreen())),
+            icon: const Icon(Icons.edit_note),
+            label: const Text('Edit programs'),
+          ),
+          FilterChip(
+            tooltip: 'Never pick explicit songs for this class',
+            avatar: const Icon(Icons.child_friendly, size: 18),
+            label: const Text('Clean class'),
+            selected: s.cleanClass,
+            onSelected: s.setCleanClass,
+          ),
+          RotationMenu(s: s),
+          OutlinedButton.icon(
+            onPressed: s.mix.isEmpty ? null : () => showRefreshDialog(context, s),
+            icon: const Icon(Icons.refresh),
+            label: const Text('Refresh'),
+          ),
+          OutlinedButton.icon(
+            onPressed: () => showSeriesDialog(context, s),
+            icon: const Icon(Icons.date_range),
+            label: const Text('Plan series…'),
+          ),
+          OutlinedButton.icon(
+            onPressed: s.mix.isEmpty ? null : () => _suggest(s),
+            icon: const Icon(Icons.skip_next),
+            label: const Text('Suggest next'),
+          ),
+          OutlinedButton.icon(
+            onPressed: s.mix.isEmpty ? null : () => showSimilar(context, s.mix.last),
+            icon: const Icon(Icons.auto_awesome_motion),
+            label: const Text('More like last song'),
+          ),
+        ]);
+      case _Opt.io:
+        return Builder(builder: (context) {
+          final app = context.watch<AppState>();
+          return Wrap(spacing: 12, runSpacing: 8, crossAxisAlignment: WrapCrossAlignment.center, children: [
+            FilledButton.tonalIcon(
+              onPressed: s.mix.isEmpty ? null : () => _saveCsv('Export mix as CSV', s.mixName, s.toCsv()),
+              icon: const Icon(Icons.table_view),
+              label: const Text('Export mix CSV'),
+            ),
+            FilledButton.tonalIcon(
+              onPressed: () => _importMixCsv(s),
+              icon: const Icon(Icons.upload_file),
+              label: const Text('Import mix CSV…'),
+            ),
+            OutlinedButton.icon(
+              onPressed: s.program.parts.isEmpty
+                  ? null
+                  : () => _saveCsv('Export program as CSV', s.program.name, programToCsv(s.program)),
+              icon: const Icon(Icons.table_rows),
+              label: const Text('Export program CSV'),
+            ),
+            OutlinedButton.icon(
+              onPressed: () => _importProgramCsv(s),
+              icon: const Icon(Icons.file_upload_outlined),
+              label: const Text('Import program CSV…'),
+            ),
+            FilledButton.tonalIcon(
+              onPressed: s.mix.isEmpty ? null : () => _export(s),
+              icon: const Icon(Icons.ios_share),
+              label: const Text('Export .m3u8 (PC paths only)'),
+            ),
+            FilledButton.tonalIcon(
+              onPressed: () => _importPlaylist(s),
+              icon: const Icon(Icons.playlist_add),
+              label: const Text('Import playlist…'),
+            ),
+            FilledButton.tonalIcon(
+              onPressed: s.mix.isEmpty ? null : () => _exportSheet(s),
+              icon: const Icon(Icons.print),
+              label: const Text('Class sheet'),
+            ),
+            FilledButton.icon(
+              onPressed: s.mix.isEmpty
+                  ? null
+                  : () => showDialog<void>(context: context, builder: (_) => SendToPhoneDialog(state: app)),
+              icon: const Icon(Icons.phone_android),
+              label: const Text('Send to phone…'),
+            ),
+            FilledButton.tonalIcon(
+              onPressed: () =>
+                  showDialog<void>(context: context, builder: (_) => const SendFolderDialog()),
+              icon: const Icon(Icons.drive_folder_upload_outlined),
+              label: const Text('Send folder to phone…'),
+            ),
+          ]);
+        });
+    }
+  }
+
   Future<void> _refillPart(MixController s, int part) async {
     final messenger = ScaffoldMessenger.of(context);
     final added = await s.refillPart(part);
@@ -513,132 +924,58 @@ class _MixTabState extends State<MixTab> {
               child: SingleChildScrollView(
                 child: Column(
                   children: [
-                    Wrap(
-                      spacing: 12,
-                      runSpacing: 8,
-                      crossAxisAlignment: WrapCrossAlignment.center,
-                      children: [
-                        PopupMenuButton<Program>(
-                          tooltip: 'Pick a program, then auto-fill it using the Mix filters below',
-                          onSelected: s.selectProgram,
-                          itemBuilder: (_) => [
-                            for (final t in s.programs)
-                              PopupMenuItem(
-                                value: t,
-                                child: Text(
-                                  '${t.name} (${t.minutes.round()} min)',
-                                ),
-                              ),
-                          ],
-                          child: Chip(
-                            avatar: const Icon(Icons.view_list),
-                            label: Text('Program: ${s.program.name}'),
-                          ),
-                        ),
-                        FilledButton.tonalIcon(
-                          onPressed: () => _fillDialog(s),
-                          icon: const Icon(Icons.auto_awesome),
-                          label: const Text('Auto-fill program'),
-                        ),
-                        OutlinedButton.icon(
-                          onPressed: () => _generate(s),
-                          icon: const Icon(Icons.auto_fix_high),
-                          label: const Text('Generate program'),
-                        ),
-                        PopupMenuButton<PartRole>(
-                          tooltip: 'Find warm-up, climb, sprint, recovery or cool-down music',
-                          onSelected: (r) => _suggestRole(s, r),
-                          itemBuilder: (_) => [
-                            for (final r in PartRole.values)
-                              if (r != PartRole.steady)
-                                PopupMenuItem(value: r, child: Text(r.label)),
-                          ],
-                          child: const Chip(
-                            avatar: Icon(Icons.queue_music),
-                            label: Text('Music for…'),
-                          ),
-                        ),
-                        OutlinedButton.icon(
-                          onPressed: () => Navigator.push(
-                            context,
-                            MaterialPageRoute(
-                              builder: (_) => const ProgramScreen(),
-                            ),
-                          ),
-                          icon: const Icon(Icons.edit_note),
-                          label: const Text('Edit programs'),
-                        ),
-                        SizedBox(
-                          width: 110,
-                          child: TextFormField(
-                            key: ValueKey(s.targetMinutes),
-                            initialValue: s.targetMinutes.round().toString(),
-                            decoration: const InputDecoration(
-                              labelText: 'Class mins',
-                              isDense: true,
-                            ),
-                            onFieldSubmitted: (v) {
-                              final m = double.tryParse(v);
-                              if (m != null && m > 0) s.setTargetMinutes(m);
-                            },
-                          ),
-                        ),
-                        Text(
-                          left >= 0
-                              ? '${_fmt(left)} left'
-                              : '${_fmt(-left)} over',
-                          style: TextStyle(
-                            color: left < 0 ? Colors.redAccent : null,
-                          ),
-                        ),
-                        OutlinedButton.icon(
-                          onPressed: s.mix.isEmpty ? null : () => _suggest(s),
-                          icon: const Icon(Icons.skip_next),
-                          label: const Text('Suggest next'),
-                        ),
-                        OutlinedButton.icon(
-                          onPressed: s.mix.isEmpty
-                              ? null
-                              : () => showSimilar(context, s.mix.last),
-                          icon: const Icon(Icons.auto_awesome_motion),
-                          label: const Text('More like last song'),
-                        ),
-                        FilledButton.tonalIcon(
-                          onPressed: s.mix.isEmpty
-                              ? null
-                              : () => _exportSheet(s),
-                          icon: const Icon(Icons.print),
-                          label: const Text('Class sheet'),
-                        ),
-                        FilterChip(
-                          tooltip: 'Never pick explicit songs for this class',
-                          avatar: const Icon(Icons.child_friendly, size: 18),
-                          label: const Text('Clean class'),
-                          selected: s.cleanClass,
-                          onSelected: s.setCleanClass,
-                        ),
-                        RotationMenu(s: s),
-                        OutlinedButton.icon(
-                          onPressed: s.mix.isEmpty ? null : () => showRefreshDialog(context, s),
-                          icon: const Icon(Icons.refresh),
-                          label: const Text('Refresh'),
-                        ),
-                        OutlinedButton.icon(
-                          onPressed: () => showSeriesDialog(context, s),
-                          icon: const Icon(Icons.date_range),
-                          label: const Text('Plan series…'),
-                        ),
-                        if (s.explicitInMix.isNotEmpty)
-                          Tooltip(
-                            message: 'Explicit: ${s.explicitInMix.map((m) => m.display).join(', ')}',
-                            child: Chip(
-                              avatar: const ExplicitBadge(),
-                              label: Text('${s.explicitInMix.length} explicit'),
-                              backgroundColor: s.cleanClass ? Colors.red.withValues(alpha: 0.25) : null,
-                            ),
-                          ),
+                    SegmentedButton<_Opt>(
+                      emptySelectionAllowed: true,
+                      showSelectedIcon: false,
+                      segments: [
+                        for (final o in _Opt.values)
+                          ButtonSegment(value: o, icon: Icon(o.icon), label: Text(o.label)),
                       ],
+                      selected: {?_opt},
+                      onSelectionChanged: (v) => _choose(v.isEmpty ? null : v.first),
                     ),
+                    const SizedBox(height: 8),
+                    Align(alignment: Alignment.centerLeft, child: _panel(s)),
+                    if (_opt == _Opt.programs || _opt == _Opt.tracks) ...[
+                      const SizedBox(height: 8),
+                      Wrap(
+                        spacing: 12,
+                        runSpacing: 8,
+                        crossAxisAlignment: WrapCrossAlignment.center,
+                        children: [
+                          SizedBox(
+                            width: 110,
+                            child: TextFormField(
+                              key: ValueKey(s.targetMinutes),
+                              initialValue: s.targetMinutes.round().toString(),
+                              decoration: const InputDecoration(labelText: 'Class mins', isDense: true),
+                              onFieldSubmitted: (v) {
+                                final m = double.tryParse(v);
+                                if (m != null && m > 0) s.setTargetMinutes(m);
+                              },
+                            ),
+                          ),
+                          Text(
+                            left >= 0 ? '${_fmt(left)} left' : '${_fmt(-left)} over',
+                            style: TextStyle(color: left < 0 ? Colors.redAccent : null),
+                          ),
+                        ],
+                      ),
+                    ],
+                    if (s.explicitInMix.isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      Align(
+                        alignment: Alignment.centerLeft,
+                        child: Tooltip(
+                          message: 'Explicit: ${s.explicitInMix.map((m) => m.display).join(', ')}',
+                          child: Chip(
+                            avatar: const ExplicitBadge(),
+                            label: Text('${s.explicitInMix.length} explicit'),
+                            backgroundColor: s.cleanClass ? Colors.red.withValues(alpha: 0.25) : null,
+                          ),
+                        ),
+                      ),
+                    ],
                     const SizedBox(height: 8),
                     Wrap(
                       spacing: 12,
@@ -691,32 +1028,6 @@ class _MixTabState extends State<MixTab> {
                           icon: const Icon(Icons.redo),
                           onPressed: s.canRedo ? s.redo : null,
                         ),
-                        FilledButton.tonalIcon(
-                          onPressed: s.mix.isEmpty ? null : () => _export(s),
-                          icon: const Icon(Icons.ios_share),
-                          label: const Text('Export .m3u8 (PC paths only)'),
-                        ),
-                        FilledButton.tonalIcon(
-                          onPressed: () => _importPlaylist(s),
-                          icon: const Icon(Icons.playlist_add),
-                          label: const Text('Import playlist…'),
-                        ),
-                        FilledButton.icon(
-                          onPressed: s.mix.isEmpty
-                              ? null
-                              : () => showDialog<void>(
-                                  context: context,
-                                  builder: (_) => SendToPhoneDialog(state: app),
-                                ),
-                          icon: const Icon(Icons.phone_android),
-                          label: const Text('Send to phone…'),
-                        ),
-                        FilledButton.tonalIcon(
-                          onPressed: () => showDialog<void>(
-                              context: context, builder: (_) => const SendFolderDialog()),
-                          icon: const Icon(Icons.drive_folder_upload_outlined),
-                          label: const Text('Send folder to phone…'),
-                        ),
                         ListenableBuilder(
                           listenable: app.phones,
                           builder: (context, _) {
@@ -743,45 +1054,14 @@ class _MixTabState extends State<MixTab> {
                           onPressed: s.mix.isEmpty ? null : () => _clear(s),
                           child: const Text('Clear'),
                         ),
-                        ActionChip(
-                          tooltip: 'Saved mixes',
-                          avatar: const Icon(Icons.folder_open),
-                          label: const Text('Saved mixes'),
-                          onPressed: s.savedMixes.isEmpty
-                              ? null
-                              : () => Navigator.push(
-                                    context,
-                                    MaterialPageRoute(
-                                      // The Mix tab's load entry point (any
-                                      // unsaved-changes guard goes here too).
-                                      builder: (_) => SavedMixesScreen(onLoad: (m) => _load(s, m)),
-                                    ),
-                                  ),
-                        ),
-                        ActionChip(
-                          tooltip: 'Log that you taught this mix (snapshots its songs)',
-                          avatar: const Icon(Icons.event_available),
-                          label: const Text('Mark as taught'),
-                          onPressed: s.mix.isEmpty
-                              ? null
-                              : () => markAsTaught(context,
-                                  mixId: s.mixDbId, mixName: s.mixName, paths: s.paths),
-                        ),
-                        ActionChip(
-                          tooltip: 'Classes you have taught',
-                          avatar: const Icon(Icons.history),
-                          label: const Text('Class history'),
-                          onPressed: () => showDialog<void>(
-                              context: context, builder: (_) => const ClassHistoryDialog()),
-                        ),
                         Text('${s.mix.length} songs, ${_fmt(s.mixSeconds)}'),
                       ],
                     ),
-                    const SizedBox(height: 8),
-                    Align(
-                      alignment: Alignment.centerLeft,
-                      child: const MixFilterBar(),
-                    ),
+                    if (_opt == _Opt.programs || _opt == _Opt.tracks) ...[
+                      const SizedBox(height: 8),
+                      const Align(alignment: Alignment.centerLeft, child: MixFilterBar()),
+                    ],
+                    if (_opt == _Opt.programs && !s.program.trackMix) ...[
                     const SizedBox(height: 8),
                     SizedBox(
                       width: double.infinity,
@@ -820,6 +1100,7 @@ class _MixTabState extends State<MixTab> {
                         ],
                       ),
                     ),
+                    ],
                     const SizedBox(height: 8),
                     SizedBox(
                       height: 120,
@@ -862,29 +1143,39 @@ class _MixTabState extends State<MixTab> {
                           key: ValueKey(song.path),
                           dense: true,
                           selected: i == _selected,
-                          leading: song.damaged
-                              ? Row(mainAxisSize: MainAxisSize.min, children: [
-                                  DamagedBadge(reason: s.damagedReasons[song.path]),
-                                  const SizedBox(width: 4),
-                                  Text('${i + 1}'),
-                                ])
-                              : warn == null
-                              ? Text('${i + 1}')
-                              : Tooltip(
-                                  message: warn,
-                                  child: Row(
-                                    mainAxisSize: MainAxisSize.min,
-                                    children: [
-                                      const Icon(
-                                        Icons.warning_amber,
-                                        color: Colors.orange,
-                                        size: 18,
+                          leading: Row(
+                            mainAxisSize: MainAxisSize.min,
+                            children: [
+                              TrackArt(path: song.path, size: 40),
+                              const SizedBox(width: 8),
+                              song.damaged
+                                  ? Row(
+                                      mainAxisSize: MainAxisSize.min,
+                                      children: [
+                                        DamagedBadge(reason: s.damagedReasons[song.path]),
+                                        const SizedBox(width: 4),
+                                        Text('${i + 1}'),
+                                      ],
+                                    )
+                                  : warn == null
+                                  ? Text('${i + 1}')
+                                  : Tooltip(
+                                      message: warn,
+                                      child: Row(
+                                        mainAxisSize: MainAxisSize.min,
+                                        children: [
+                                          const Icon(
+                                            Icons.warning_amber,
+                                            color: Colors.orange,
+                                            size: 18,
+                                          ),
+                                          const SizedBox(width: 4),
+                                          Text('${i + 1}'),
+                                        ],
                                       ),
-                                      const SizedBox(width: 4),
-                                      Text('${i + 1}'),
-                                    ],
-                                  ),
-                                ),
+                                    ),
+                            ],
+                          ),
                           title: Row(
                             crossAxisAlignment: CrossAxisAlignment.start,
                             children: [
@@ -938,6 +1229,47 @@ class _MixTabState extends State<MixTab> {
                           trailing: Row(
                             mainAxisSize: MainAxisSize.min,
                             children: [
+                              if (s.program.trackMix && _partOf(s, i) != null)
+                                PopupMenuButton<PartRole>(
+                                  tooltip: 'Choose the exercise for this song',
+                                  icon: const Icon(Icons.fitness_center),
+                                  onSelected: (r) => s.assignExercise(i, r),
+                                  itemBuilder: (_) => [
+                                    for (final r in PartRole.values)
+                                      PopupMenuItem(
+                                        value: r,
+                                        child: Text(r.label),
+                                      ),
+                                  ],
+                                ),
+                              if (_partOf(s, i) != null)
+                                IconButton(
+                                  tooltip: _partOf(s, i)!.trainerNote.isEmpty
+                                      ? 'Add a trainer note to this exercise'
+                                      : 'Edit the exercise note',
+                                  isSelected: _partOf(s, i)!.trainerNote.isNotEmpty,
+                                  icon: const Icon(Icons.sticky_note_2_outlined),
+                                  selectedIcon: const Icon(Icons.sticky_note_2),
+                                  onPressed: () => _partNoteDialog(s, s.mixPart[i]!),
+                                ),
+                              if ((!song.damaged && (s.planAt(i)?.segments.length ?? 0) > 1) ||
+                                  s.songSegments.containsKey(song.path))
+                                IconButton(
+                                  tooltip: 'Set the length and notes of the sub-exercises',
+                                  isSelected: s.songSegments.containsKey(song.path),
+                                  icon: const Icon(Icons.timeline),
+                                  selectedIcon: const Icon(Icons.edit_calendar),
+                                  onPressed: () => showSegmentEditor(context, app, i),
+                                ),
+                              IconButton(
+                                tooltip: (s.timedNotes[song.path]?.isNotEmpty ?? false)
+                                    ? 'Play and edit timed trainer notes (${s.timedNotes[song.path]!.length})'
+                                    : 'Play the song and add timed trainer notes',
+                                isSelected: s.timedNotes[song.path]?.isNotEmpty ?? false,
+                                icon: const Icon(Icons.edit_note),
+                                selectedIcon: const Icon(Icons.speaker_notes),
+                                onPressed: () => showAnnotatePlayer(context, app, i),
+                              ),
                               IconButton(
                                 tooltip: s.songNotes[song.path] == null
                                     ? 'Add a coaching cue for this song (shown and spoken on the phone)'

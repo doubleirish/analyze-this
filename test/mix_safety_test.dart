@@ -17,6 +17,10 @@ void main() {
   setUp(() async => db = await MusicDb.open(':memory:'));
   tearDown(() async => db.close());
 
+  test('no pre-generated programs are offered', () {
+    expect(MixController(db).programs, isEmpty);
+  });
+
   test('undo / redo of add, remove, reorder and fill', () async {
     for (var k = 0; k < 6; k++) {
       await db.upsertSong(song('s$k', bpm: 80.0 + k * 3, duration: 240));

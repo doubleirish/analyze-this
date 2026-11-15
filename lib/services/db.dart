@@ -11,6 +11,13 @@ export 'song_models.dart';
 
 String _like(String s) => '%${s.replaceAll('\\', '\\\\').replaceAll('%', '\\%').replaceAll('_', '\\_')}%';
 
+String _browseOrder(BrowseSort sort, String name) => switch (sort) {
+      BrowseSort.songs => 'songs DESC, $name COLLATE NOCASE',
+      BrowseSort.name => '$name COLLATE NOCASE',
+      BrowseSort.recent => 'MAX(added_at) DESC, $name COLLATE NOCASE',
+      BrowseSort.favourite => 'favs DESC, songs DESC, $name COLLATE NOCASE',
+    };
+
 class MusicDb {
   MusicDb._(this._db);
 
@@ -22,7 +29,7 @@ class MusicDb {
     sqfliteFfiInit();
     final db = await databaseFactoryFfi.openDatabase(
       path,
-      options: OpenDatabaseOptions(version: 20, onCreate: _create, onUpgrade: _upgrade),
+      options: OpenDatabaseOptions(version: 21, onCreate: _create, onUpgrade: _upgrade),
     );
     return MusicDb._(db);
   }
@@ -61,6 +68,17 @@ class MusicDb {
     await _createV18(db);
     await _createV19(db);
     await _createV20(db);
+    await _createV21(db);
+  }
+
+  /// Title override plus the log that lets a relabel batch be undone.
+  static Future<void> _createV21(Database db) async {
+    final have = {for (final r in await db.rawQuery('PRAGMA table_info(overrides)')) r['name'] as String};
+    if (!have.contains('title')) await db.execute('ALTER TABLE overrides ADD COLUMN title TEXT');
+    await db.execute('''CREATE TABLE IF NOT EXISTS relabel_log(
+      id INTEGER PRIMARY KEY AUTOINCREMENT, batch INTEGER NOT NULL, path TEXT NOT NULL,
+      field TEXT NOT NULL, old_value TEXT, new_value TEXT, file_written INTEGER DEFAULT 0,
+      at INTEGER NOT NULL)''');
   }
 
   static Future<void> _createV20(Database db) async {
@@ -238,6 +256,7 @@ class MusicDb {
     if (from < 18) await _createV18(db);
     if (from < 19) await _createV19(db);
     if (from < 20) await _createV20(db);
+    if (from < 21) await _createV21(db);
   }
 
   Future<void> close() => _db.close();
@@ -788,9 +807,8 @@ class MusicDb {
   }
 
   /// One row per artist (names compared ignoring case and spacing).
-  /// [bySongs] orders most songs first; [hideUpTo] hides artists with that many
-  /// songs or fewer.
-  Future<List<ArtistInfo>> artists({String filter = '', bool bySongs = true, int hideUpTo = 0, String? genre}) async {
+  /// [hideUpTo] hides artists with that many songs or fewer.
+  Future<List<ArtistInfo>> artists({String filter = '', BrowseSort sort = BrowseSort.songs, int hideUpTo = 0, String? genre}) async {
     final args = <Object?>[];
     var where = "artist IS NOT NULL AND TRIM(artist) <> ''";
     if (filter.trim().isNotEmpty) {
@@ -804,12 +822,13 @@ class MusicDb {
     final rows = await _db.rawQuery('''
       SELECT MIN(artist) AS name, COUNT(*) AS songs,
              COUNT(DISTINCT LOWER(TRIM(COALESCE(album, '')))) AS albums,
+             SUM(CASE WHEN fav = 1 THEN 1 ELSE 0 END) AS favs,
              MIN(path) AS sample, MIN(median_bpm) AS lo, MAX(median_bpm) AS hi,
              SUM(CASE WHEN path IN (SELECT path FROM mix_items) THEN 1 ELSE 0 END) AS used,
              $coverageCols
       FROM songs WHERE $where
       GROUP BY LOWER(TRIM(artist)) HAVING COUNT(*) > $hideUpTo
-      ORDER BY ${bySongs ? 'songs DESC, ' : ''}name COLLATE NOCASE''', args);
+      ORDER BY ${_browseOrder(sort, 'name')}''', args);
     return [
       for (final r in rows)
         ArtistInfo(
@@ -829,7 +848,7 @@ class MusicDb {
   Future<List<AlbumInfo>> albums({
     String filter = '',
     String? artist,
-    bool bySongs = false,
+    BrowseSort sort = BrowseSort.name,
     int hideUpTo = 0,
     String? genre,
   }) async {
@@ -857,7 +876,7 @@ class MusicDb {
       FROM songs WHERE $where
       GROUP BY LOWER(TRIM(album)), LOWER(TRIM(COALESCE(artist, '')))
       HAVING COUNT(*) > $hideUpTo
-      ORDER BY ${bySongs ? 'songs DESC, ' : ''}album COLLATE NOCASE''', args);
+      ORDER BY ${_browseOrder(sort, 'album')}''', args);
     return [
       for (final r in rows)
         AlbumInfo(
@@ -1014,7 +1033,8 @@ class MusicDb {
 
   /// Sets artist/album/genre/year on many songs. The values are remembered
   /// so a rescan does not put the original tags back; null leaves a field alone.
-  Future<void> setOverrides(Iterable<String> paths, {String? artist, String? album, String? genre, int? year}) async {
+  Future<void> setOverrides(Iterable<String> paths,
+      {String? artist, String? album, String? genre, int? year, String? title}) async {
     await _db.transaction((t) async {
       for (final p in paths) {
         final old = await t.query('overrides', where: 'path = ?', whereArgs: [p]);
@@ -1025,6 +1045,7 @@ class MusicDb {
           'album': ?album,
           'genre': ?genre,
           'year': ?year,
+          'title': ?title,
         };
         await t.insert('overrides', o, conflictAlgorithm: ConflictAlgorithm.replace);
         final upd = <String, Object?>{
@@ -1033,15 +1054,46 @@ class MusicDb {
           'genre': ?genre,
           if (genre != null) 'genre_src': null,
           'year': ?year,
+          'title': ?title,
         };
-        if (artist != null) {
-          final r = await t.query('songs', columns: ['title'], where: 'path = ?', whereArgs: [p]);
-          if (r.isNotEmpty) upd['dup_key'] = dupKeyFor(artist, r.first['title'] as String?);
+        if (artist != null || title != null) {
+          final r = await t.query('songs', columns: ['title', 'artist'], where: 'path = ?', whereArgs: [p]);
+          if (r.isNotEmpty) {
+            upd['dup_key'] = dupKeyFor(artist ?? r.first['artist'] as String?, title ?? r.first['title'] as String?);
+          }
         }
         if (upd.isNotEmpty) await t.update('songs', upd, where: 'path = ?', whereArgs: [p]);
       }
     });
   }
+
+  /// Records one applied relabel change so the batch can be undone.
+  Future<void> logRelabel(int batch, String path, String field, String? oldValue, String? newValue,
+          {bool fileWritten = false}) =>
+      _db.insert('relabel_log', {
+        'batch': batch,
+        'path': path,
+        'field': field,
+        'old_value': oldValue,
+        'new_value': newValue,
+        'file_written': fileWritten ? 1 : 0,
+        'at': DateTime.now().millisecondsSinceEpoch,
+      });
+
+  Future<int> nextRelabelBatch() async {
+    final r = await _db.rawQuery('SELECT MAX(batch) AS b FROM relabel_log');
+    return ((r.first['b'] as int?) ?? 0) + 1;
+  }
+
+  Future<int?> lastRelabelBatch() async {
+    final r = await _db.rawQuery('SELECT MAX(batch) AS b FROM relabel_log');
+    return r.first['b'] as int?;
+  }
+
+  Future<List<Map<String, Object?>>> relabelBatch(int batch) =>
+      _db.query('relabel_log', where: 'batch = ?', whereArgs: [batch], orderBy: 'id');
+
+  Future<void> deleteRelabelBatch(int batch) => _db.delete('relabel_log', where: 'batch = ?', whereArgs: [batch]);
 
   /// The manual BPM fix stored in an [override] row, if any.
   static ManualBpm? bpmFixOf(Map<String, Object?>? ov) {

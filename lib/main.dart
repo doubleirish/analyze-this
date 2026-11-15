@@ -15,6 +15,7 @@ import 'services/backup.dart';
 import 'services/damage_scan.dart';
 import 'services/db.dart';
 import 'services/mix_controller.dart';
+import 'services/output_controller.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -27,6 +28,8 @@ Future<void> main() async {
   final state = AppState(db)..backups = BackupService(db, dir);
   await state.load();
   await state.initPlayback();
+  final outputs = OutputController(state);
+  unawaited(outputs.init());
   unawaited(state.backups.autoBackupIfDue().catchError((_) => null));
   runApp(MultiProvider(providers: [
     ChangeNotifierProvider<AppState>.value(value: state),
@@ -35,6 +38,7 @@ Future<void> main() async {
     ChangeNotifierProvider<AlbumHealthController>.value(value: state.health),
     ChangeNotifierProvider<DamageScanController>.value(value: state.damage),
     ChangeNotifierProvider<ArtController>.value(value: state.artwork),
+    ChangeNotifierProvider<OutputController>.value(value: outputs),
   ], child: const AnalyzeThisApp()));
 }
 

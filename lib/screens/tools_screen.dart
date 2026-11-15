@@ -16,19 +16,22 @@ import '../services/share.dart';
 import '../services/usb_sync.dart';
 import 'browse_screens.dart' show openAlbum;
 import 'mix_add.dart';
+import 'relabel_view.dart';
 import 'send_dialog.dart';
+import 'wishlist_view.dart';
 
 class ToolsScreen extends StatelessWidget {
   const ToolsScreen({super.key});
 
   @override
   Widget build(BuildContext context) => DefaultTabController(
-        length: 9,
+        length: 11,
         child: Scaffold(
           appBar: AppBar(
             title: const Text('Library tools'),
             bottom: const TabBar(isScrollable: true, tabs: [
               Tab(icon: Icon(Icons.auto_fix_high), text: 'Tidy tags'),
+              Tab(icon: Icon(Icons.travel_explore), text: 'Relabel'),
               Tab(icon: Icon(Icons.drive_file_move), text: 'Organize files'),
               Tab(icon: Icon(Icons.link_off), text: 'Missing files'),
               Tab(icon: Icon(Icons.health_and_safety), text: 'Album health'),
@@ -37,11 +40,12 @@ class ToolsScreen extends StatelessWidget {
               Tab(icon: Icon(Icons.share), text: 'Share'),
               Tab(icon: Icon(Icons.graphic_eq), text: 'Loudness'),
               Tab(icon: Icon(Icons.backup), text: 'Backup'),
+              Tab(icon: Icon(Icons.playlist_add_check), text: 'Wish list'),
             ]),
           ),
           body: const TabBarView(children: [
             _TidyTab(),
-            _OrganizeTab(),
+            RelabelView(),
             _MissingTab(),
             _HealthTab(),
             _DamageTab(),
@@ -49,6 +53,7 @@ class ToolsScreen extends StatelessWidget {
             _ShareTab(),
             _LoudnessTab(),
             _BackupTab(),
+            WishlistView(),
           ]),
         ),
       );

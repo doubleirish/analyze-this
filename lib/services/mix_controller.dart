@@ -8,12 +8,17 @@ import 'package:shared_core/shared_core.dart';
 import 'activities.dart';
 import 'db.dart';
 import 'm3u_import.dart';
+import 'wishlist_match.dart';
+import 'wishlist_parse.dart';
+import 'exercises.dart';
 import 'fill_planner.dart';
+import 'mix_csv.dart';
 import 'planner.dart';
-import 'program_generator.dart' show Bookends, themedBuiltins;
+import 'program_generator.dart' show Bookends;
 import 'readiness.dart';
-
+import 'segment_edit.dart';
 part 'mix_series.dart';
+part 'track_mix.dart';
 
 /// The mix being built on the Mix tab: its songs, the program part of each
 /// song, the program, the name and phone identity, plus the Mix page filters,
@@ -41,7 +46,7 @@ class MixController extends ChangeNotifier {
   List<int?> mixPart = [];
   Program program = classicProgram;
   List<Program> userPrograms = [];
-  List<Program> get programs => [...builtinPrograms, ...themedBuiltins, ...userPrograms];
+  List<Program> get programs => userPrograms;
 
   String mixName = 'New mix';
 
@@ -66,6 +71,72 @@ class MixController extends ChangeNotifier {
   /// Coaching notes for songs in the mix, by path (shown on the phone).
   Map<String, String> songNotes = {};
 
+  /// Hand-set sub-exercises by song path; they replace the automatic pattern
+  /// for that song (see [planAt]). Pruned with the songs like [songNotes].
+  Map<String, List<SegmentEdit>> songSegments = {};
+
+  /// Trainer notes pinned to a moment of a song, by song path, sorted by time.
+  Map<String, List<TimedNote>> timedNotes = {};
+
+  /// Adds a note at [at] seconds (one undo step); returns false for blank text.
+  bool addTimedNote(String path, double at, String text) {
+    final t = text.trim();
+    if (t.isEmpty || at < 0) return false;
+    _setTimed(path, [...?timedNotes[path], TimedNote(at, t)]);
+    return true;
+  }
+
+  /// Replaces the note at [index] (sorted order); blank [text] deletes it.
+  void updateTimedNote(String path, int index, {double? at, String? text}) {
+    final list = [...?timedNotes[path]];
+    if (index < 0 || index >= list.length) return;
+    final t = (text ?? list[index].text).trim();
+    if (t.isEmpty) {
+      list.removeAt(index);
+    } else {
+      list[index] = TimedNote(max(0, at ?? list[index].at), t);
+    }
+    _setTimed(path, list);
+  }
+
+  void removeTimedNote(String path, int index) => updateTimedNote(path, index, text: '');
+
+  void _setTimed(String path, List<TimedNote> list) {
+    list.sort((a, b) => a.at.compareTo(b.at));
+    final cur = timedNotes[path] ?? const <TimedNote>[];
+    if (cur.length == list.length && [for (var i = 0; i < cur.length; i++) cur[i] == list[i]].every((x) => x)) {
+      return;
+    }
+    _edit(() {
+      timedNotes = {...timedNotes}..remove(path);
+      if (list.isNotEmpty) timedNotes[path] = list;
+    });
+  }
+  /// Sets (or with null / empty clears) the manual sub-exercises of [path]; one undo step.
+  void setSongSegments(String path, List<SegmentEdit>? edits) {
+    final cur = songSegments[path];
+    final next = edits == null || edits.isEmpty ? null : List.of(edits);
+    if (cur == null && next == null) return;
+    if (cur != null && next != null && _sameEdits(cur, next)) return;
+    _edit(() {
+      songSegments = {...songSegments}..remove(path);
+      if (next != null) songSegments[path] = next;
+    });
+  }
+
+  static bool _sameEdits(List<SegmentEdit> a, List<SegmentEdit> b) =>
+      a.length == b.length && [for (var i = 0; i < a.length; i++) a[i] == b[i]].every((x) => x);
+
+  /// Sets (or with an empty [note] clears) the trainer note of program part [part]; one undo step.
+  void setPartNote(int part, String note) {
+    if (part < 0 || part >= program.parts.length) return;
+    final n = note.trim();
+    if (program.parts[part].trainerNote == n) return;
+    _edit(() => program = program.copyWith(parts: [
+          for (var i = 0; i < program.parts.length; i++)
+            i == part ? program.parts[i].copyWith(trainerNote: n) : program.parts[i]
+        ]));
+  }
   /// Sets (or with an empty [note] clears) the note for [path]; one undo step.
   void setSongNote(String path, String note) {
     final n = note.trim();
@@ -86,6 +157,7 @@ class MixController extends ChangeNotifier {
     final before = undoable ? snapshot() : null;
     apply();
     _syncParts();
+    if (program.trackMix) _normalizeTrackMix();
     lockedPaths.retainAll(paths);
     _pruneNotes();
     if (before != null) {
@@ -118,6 +190,8 @@ class MixController extends ChangeNotifier {
       parts: List.of(mixPart),
       locked: {...lockedPaths},
       notes: {...songNotes},
+      segments: {...songSegments},
+      timed: {...timedNotes},
       program: program,
       name: mixName,
       nameAuto: mixNameAuto,
@@ -134,6 +208,8 @@ class MixController extends ChangeNotifier {
     mixPart = List.of(s.parts);
     lockedPaths = {...s.locked};
     songNotes = {...s.notes};
+    songSegments = {...s.segments};
+    timedNotes = {...s.timed};
     program = s.program;
     mixName = s.name;
     mixNameAuto = s.nameAuto;
@@ -148,9 +224,11 @@ class MixController extends ChangeNotifier {
   }
 
   void _pruneNotes() {
-    if (songNotes.isEmpty) return;
+    if (songNotes.isEmpty && songSegments.isEmpty && timedNotes.isEmpty) return;
     final have = paths.toSet();
     songNotes.removeWhere((k, _) => !have.contains(k));
+    songSegments.removeWhere((k, _) => !have.contains(k));
+    timedNotes.removeWhere((k, _) => !have.contains(k));
   }
 
   void undo() {
@@ -200,6 +278,8 @@ class MixController extends ChangeNotifier {
             'parts': s.parts,
             'locked': [for (final m in s.songs) if (s.locked.contains(m.path)) m.path],
             'notes': s.notes,
+            'segments': segmentsToJson(s.segments),
+            'timed': timedToJson(s.timed),
             'program': s.program.toJson(),
             'name': s.name,
             'nameAuto': s.nameAuto,
@@ -240,6 +320,14 @@ class MixController extends ChangeNotifier {
       songNotes = {
         for (final e in ((j['notes'] as Map?) ?? const {}).entries)
           if (this.paths.contains(e.key)) e.key as String: e.value as String
+      };
+      songSegments = {
+        for (final e in segmentsFromJson(j['segments']).entries)
+          if (this.paths.contains(e.key)) e.key: e.value
+      };
+      timedNotes = {
+        for (final e in timedFromJson(j['timed']).entries)
+          if (this.paths.contains(e.key)) e.key: e.value
       };
       if (j['program'] is Map) {
         program = Program.fromJson((j['program'] as Map).cast<String, dynamic>());
@@ -283,6 +371,23 @@ class MixController extends ChangeNotifier {
     if (mixPart.length > mix.length) mixPart = mixPart.sublist(0, mix.length);
   }
 
+  /// Keeps a track mix's parts matching its songs: part i belongs to song i,
+  /// kept in song order, and a part's length follows its song's.
+  void _normalizeTrackMix() {
+    final old = program.parts;
+    final parts = <ProgramPart>[];
+    for (var i = 0; i < mix.length; i++) {
+      final pi = mixPart[i];
+      final cur = pi != null && pi < old.length ? old[pi] : null;
+      final p = cur ?? defaultTrackPart(mix[i]);
+      parts.add(p.music && mix[i].playSeconds != null
+          ? p.copyWith(minutes: mix[i].playSeconds! / 60)
+          : p);
+    }
+    mixPart = [for (var i = 0; i < mix.length; i++) i];
+    program = Program(program.name, parts, trackMix: true);
+  }
+
   // ---- songs ----
 
   List<String> get paths => [for (final s in mix) s.path];
@@ -304,6 +409,7 @@ class MixController extends ChangeNotifier {
   /// (see [buildPartPlans]). [fallbackSeconds] is used when a length is unknown.
   StepPlan? planAt(int i, {double? fallbackSeconds}) {
     final part = partAt(i);
+    final timed = timedNotes[mix[i].path] ?? const <TimedNote>[];
     if (part == null) return null;
     _syncParts();
     var a = i, b = i + 1;
@@ -313,8 +419,21 @@ class MixController extends ChangeNotifier {
     while (b < mix.length && mixPart[b] == mixPart[i]) {
       b++;
     }
-    return buildPartPlans(
+    final plan = buildPartPlans(
         part, [for (var k = a; k < b; k++) mix[k].playSeconds ?? fallbackSeconds])[i - a];
+    final manual = songSegments[mix[i].path];
+    if (manual == null && timed.isEmpty) return plan;
+    return StepPlan(
+        activity: plan.activity,
+        icon: plan.icon,
+        minRpm: plan.minRpm,
+        maxRpm: plan.maxRpm,
+        baseGear: plan.baseGear,
+        notes: plan.notes,
+        timedNotes: timed,
+        segments: manual == null
+            ? plan.segments
+            : applySegmentEdits(manual, mix[i].playSeconds ?? fallbackSeconds ?? 0));
   }
 
   /// Seconds of songs currently assigned to program part [part].
@@ -1139,16 +1258,44 @@ class MixController extends ChangeNotifier {
     final entries = parseM3uEntries(text, baseDir: baseDir);
     final matches = matchM3uEntries(entries, await db.songPathIndex());
     final songs = await db.songsAt([for (final m in matches) ?m.path]);
+    return _importMatched([
+      for (var i = 0; i < entries.length; i++)
+        (entries[i].line, songs[matches[i].path], matches[i].reason)
+    ], replace: replace, name: name);
+  }
+
+  /// Imports an artist/title list without guessing uncertain matches.
+  Future<M3uImportResult> importTrackList(String text, {bool replace = true}) async {
+    final entries = [
+      for (final line in text.split(RegExp(r'\r?\n')))
+        ...parseWishlist(line),
+    ];
+    final matches = matchWishlist(entries, await db.allSongs());
+    return _importMatched([
+      for (final match in matches)
+        (
+          match.entry.line,
+          match.status == WishStatus.owned ? match.songs.first : null,
+          switch (match.status) {
+            WishStatus.owned => null,
+            WishStatus.damaged => M3uSkipReason.damaged,
+            WishStatus.missing => M3uSkipReason.notFound,
+            WishStatus.ambiguous => M3uSkipReason.ambiguousTrack,
+          },
+        )
+    ], replace: replace);
+  }
+
+  M3uImportResult _importMatched(
+      List<(String, Song?, M3uSkipReason?)> entries, {required bool replace, String? name}) {
     final picked = <Song>[];
     final seen = <String>{};
     final skipped = <M3uSkip>[];
-    for (var i = 0; i < entries.length; i++) {
-      final path = matches[i].path;
-      final song = path == null ? null : songs[path];
+    for (final (line, song, reason) in entries) {
       if (song == null) {
-        skipped.add(M3uSkip(entries[i].line, matches[i].reason ?? M3uSkipReason.notFound));
+        skipped.add(M3uSkip(line, reason ?? M3uSkipReason.notFound));
       } else if (!seen.add(song.path)) {
-        skipped.add(M3uSkip(entries[i].line, M3uSkipReason.duplicate));
+        skipped.add(M3uSkip(line, M3uSkipReason.duplicate));
       } else {
         picked.add(song);
       }
@@ -1193,6 +1340,8 @@ class MixController extends ChangeNotifier {
     _syncParts();
     final id = await db.saveMix(name, [for (final s in mix) s.path],
         parts: mixPart, program: jsonEncode(program.toJson()), notes: songNotes);
+    await db.setSetting('mix_segments:$id', jsonEncode(segmentsToJson(songSegments)));
+    await db.setSetting('mix_timed:$id', jsonEncode(timedToJson(timedNotes)));
     await db.markMixed(paths);
     final rowKey = await db.setting('mix_key:$id');
     var key = mixKey;
@@ -1254,11 +1403,27 @@ class MixController extends ChangeNotifier {
     }
     final mixtapeKey = key;
     final notes = await db.mixNotes(m.id);
+    final rawSegments = await db.setting('mix_segments:${m.id}');
+    var segments = <String, List<SegmentEdit>>{};
+    if (rawSegments != null) {
+      try {
+        segments = segmentsFromJson(jsonDecode(rawSegments));
+      } catch (_) {}
+    }
+    var timed = <String, List<TimedNote>>{};
+    final rawTimed = await db.setting('mix_timed:${m.id}');
+    if (rawTimed != null) {
+      try {
+        timed = timedFromJson(jsonDecode(rawTimed));
+      } catch (_) {}
+    }
     _edit(() {
       mix = songs;
       mixPart = parts;
       lockedPaths = {};
       songNotes = notes;
+      songSegments = segments;
+      timedNotes = timed;
       mixName = m.name;
       mixNameAuto = false;
       mixDbId = m.id;
@@ -1332,7 +1497,15 @@ class MixController extends ChangeNotifier {
 
   String classSheet() {
     _syncParts();
-    return buildClassSheet(mixName, mix, program: program, parts: mixPart, notes: songNotes);
+    return buildClassSheet(mixName, mix,
+        program: program,
+        parts: mixPart,
+        notes: songNotes,
+        timedNotes: timedNotes,
+        manualSegments: {
+          for (var i = 0; i < mix.length; i++)
+            if (songSegments[mix[i].path] != null) mix[i].path: planAt(i)?.segments ?? const <StepSegment>[],
+        });
   }
 
   String mixAsM3u8() => buildM3u8([
@@ -1342,6 +1515,31 @@ class MixController extends ChangeNotifier {
       ]);
 }
 
+/// JSON helpers for [MixController.songSegments].
+Map<String, Object?> segmentsToJson(Map<String, List<SegmentEdit>> m) => {
+      for (final e in m.entries) e.key: [for (final s in e.value) s.toJson()]
+    };
+
+Map<String, List<SegmentEdit>> segmentsFromJson(Object? j) => {
+      if (j is Map)
+        for (final e in j.entries)
+          e.key as String: [
+            for (final s in (e.value as List)) SegmentEdit.fromJson((s as Map).cast<String, dynamic>())
+          ]
+    };
+
+Map<String, Object?> timedToJson(Map<String, List<TimedNote>> m) => {
+      for (final e in m.entries) e.key: [for (final n in e.value) n.toJson()]
+    };
+
+Map<String, List<TimedNote>> timedFromJson(Object? j) => {
+      if (j is Map)
+        for (final e in j.entries)
+          e.key as String: [
+            for (final n in (e.value as List)) TimedNote.fromJson((n as Map).cast<String, dynamic>())
+          ]
+    };
+
 /// One undo step: a copy of the mix (see [MixController.snapshot]).
 class MixSnapshot {
   const MixSnapshot({
@@ -1349,6 +1547,8 @@ class MixSnapshot {
     required this.parts,
     required this.locked,
     this.notes = const {},
+    this.segments = const {},
+    this.timed = const {},
     required this.program,
     required this.name,
     required this.nameAuto,
@@ -1361,6 +1561,8 @@ class MixSnapshot {
   final List<int?> parts;
   final Set<String> locked;
   final Map<String, String> notes;
+  final Map<String, List<SegmentEdit>> segments;
+  final Map<String, List<TimedNote>> timed;
   final Program program;
   final String name;
   final bool nameAuto;
@@ -1374,6 +1576,10 @@ class MixSnapshot {
         'parts': parts,
         'locked': [for (final s in songs) if (locked.contains(s.path)) s.path],
         if (notes.isNotEmpty) 'notes': {for (final s in songs) if (notes[s.path] != null) s.path: notes[s.path]},
+        if (segments.isNotEmpty)
+          'segments': segmentsToJson({for (final s in songs) if (segments[s.path] != null) s.path: segments[s.path]!}),
+        if (timed.isNotEmpty)
+          'timed': timedToJson({for (final s in songs) if (timed[s.path] != null) s.path: timed[s.path]!}),
         'program': program.toJson(),
         'name': name.trim(),
       });
@@ -1383,6 +1589,8 @@ class MixSnapshot {
       parts: parts,
       locked: locked,
       notes: notes,
+      segments: segments,
+      timed: timed,
       program: program,
       name: name,
       nameAuto: nameAuto,

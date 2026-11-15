@@ -3,9 +3,10 @@ import 'package:provider/provider.dart';
 
 import '../services/app_state.dart';
 import '../services/db.dart';
+import 'duplicate_cleanup.dart';
 
-/// Songs that share an artist and title. The copy in the folder with the most
-/// songs is suggested as the one to keep. "Remove" only drops the database
+/// Songs that share an artist and title. Health and estimated quality determine
+/// the suggested keeper. "Remove" only drops the database
 /// entry; "Delete file" removes it from disk after confirmation.
 class DuplicatesScreen extends StatefulWidget {
   const DuplicatesScreen({super.key});
@@ -23,7 +24,9 @@ class _DuplicatesScreenState extends State<DuplicatesScreen> {
     _groups = context.read<AppState>().duplicates();
   }
 
-  void _reload() => setState(() => _groups = context.read<AppState>().duplicates());
+  void _reload() {
+    if (mounted) setState(() { _groups = context.read<AppState>().duplicates(); });
+  }
 
   Future<bool> _confirm(String title, String body, String action) async =>
       await showDialog<bool>(
@@ -44,8 +47,9 @@ class _DuplicatesScreenState extends State<DuplicatesScreen> {
     final ok = await _confirm(
       deleteFiles ? 'Delete ${songs.length} files from disk?' : 'Remove ${songs.length} songs?',
       deleteFiles
-          ? 'Each suggested copy (the one in the folder with fewer songs) and its sidecars '
-              'will be permanently deleted. This cannot be undone.'
+          ? 'Each lower-ranked copy and its sidecars will be permanently deleted, '
+              'including healthy Android-compatible copies. Different album versions '
+              'can share a title. This cannot be undone.\n\n${songs.map((s) => s.path).join('\n')}'
           : 'The suggested copies are dropped from the library; files stay on disk.',
       deleteFiles ? 'Delete files' : 'Remove',
     );
@@ -68,12 +72,21 @@ class _DuplicatesScreenState extends State<DuplicatesScreen> {
           final groups = snap.data!;
           if (groups.isEmpty) return const Center(child: Text('No duplicates found'));
           final removals = [for (final g in groups) ...g.suggestedRemovals];
+          final all = [for (final g in groups) ...g.songs];
           return ListView(children: [
             Padding(
               padding: const EdgeInsets.all(12),
               child: Wrap(spacing: 12, runSpacing: 8, crossAxisAlignment: WrapCrossAlignment.center, children: [
                 Text('${groups.length} duplicate songs; ${removals.length} copies suggested for removal '
-                    '(in folders with fewer songs)'),
+                    '(health, estimated bitrate, format)'),
+                if (damagedDuplicateCopies(all).isNotEmpty)
+                  FilledButton.tonal(
+                    onPressed: () async {
+                      await confirmDuplicateCleanup(context, all);
+                      _reload();
+                    },
+                    child: const Text('Delete damaged copies…'),
+                  ),
                 FilledButton.tonal(
                     onPressed: () => _applyAll(removals, deleteFiles: false),
                     child: const Text('Remove all suggested from library')),
@@ -93,7 +106,8 @@ class _DuplicatesScreenState extends State<DuplicatesScreen> {
                         i == g.keeper ? Colors.green.withValues(alpha: 0.3) : Colors.orange.withValues(alpha: 0.3),
                   ),
                   title: Text(g.songs[i].path),
-                  subtitle: Text('${g.dirCounts[i]} songs in this folder  ·  '
+                  subtitle: Text('${g.songs[i].qualityDescription}  ·  '
+                      '${g.dirCounts[i]} songs in this folder  ·  '
                       '${g.songs[i].medianBpm?.round() ?? '-'} BPM'),
                   trailing: Row(mainAxisSize: MainAxisSize.min, children: [
                     IconButton(

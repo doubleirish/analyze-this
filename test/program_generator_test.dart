@@ -1,5 +1,3 @@
-import 'dart:convert';
-import 'dart:io';
 import 'dart:math';
 
 import 'package:analyze_this/services/activities.dart';
@@ -180,26 +178,6 @@ void main() {
       expect(recoveryPlan(8, full: 2.5, short: 1.5), [0, 2.5, 0, 2.5, 0, 1.5, 0, 0]);
     });
 
-    test('every built-in program follows the rhythm', () {
-      for (final p in [...builtinPrograms, ...themedBuiltins]) {
-        expectClassRhythm(p, p.name);
-      }
-      expect(builtinPrograms.where((p) => p.parts.any((x) => x.kind == PartRole.halfAndHalf)),
-          hasLength(2));
-    });
-
-    test('themed built-ins: 6 themes + 2 mixed at 30/45/55, right length, unique names', () {
-      expect(themedBuiltins, hasLength(24));
-      expect({for (final p in themedBuiltins) p.name}, hasLength(24));
-      for (final p in themedBuiltins) {
-        final m = int.parse(RegExp(r'(\d+) min').firstMatch(p.name)!.group(1)!);
-        expect(p.minutes, closeTo(m, 0.01), reason: p.name);
-        expect(p.builtin, isTrue);
-      }
-      final speed = themedBuiltins.firstWhere((p) => p.name == 'Speed / sprint · 30 min');
-      expect(speed.parts.any((x) => x.minRpm >= 110 && x.maxRpm <= 120), isTrue);
-    });
-
     test('names show style, part count and minutes', () {
       final p = generateProgram(
           minutes: 45, style: ClassStyle.pyramid, random: Random(3));
@@ -235,19 +213,6 @@ void main() {
       expect(classicProgram.parts.last.kind, PartRole.stretch);
     });
 
-    test('the 45 and 55 minute built-ins are exactly what they always were', () {
-      final was = (jsonDecode(File('test/builtin_programs.json').readAsStringSync()) as Map)
-          .cast<String, dynamic>();
-      final now = {
-        for (final p in themedBuiltins)
-          if (!p.name.contains('30 min'))
-            p.name: [for (final x in p.parts) '${x.name}|${x.minutes}|${x.minRpm}|${x.maxRpm}']
-      };
-      expect(now.keys, was.keys);
-      for (final name in was.keys) {
-        expect(now[name], was[name], reason: name);
-      }
-    });
   });
 
   group('optional warm-up, cool-down and stretch', () {

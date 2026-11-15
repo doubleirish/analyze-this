@@ -3,6 +3,8 @@ import 'dart:io';
 
 import 'package:shared_core/shared_core.dart';
 
+import 'best_of.dart';
+
 class AlbumRelease {
   const AlbumRelease(this.title, this.date, this.type, this.coverUrl);
   final String title;
@@ -70,20 +72,21 @@ class Discography {
   File _json(String artist) =>
       File('${dir.path}${Platform.pathSeparator}${ArtistArt.keyFor(artist)}.json');
 
-  /// Null when Deezer has no matching artist. Throws on network failure
-  /// (nothing is cached then, so the next call retries).
-  Future<List<AlbumRelease>?> releases(String artist) =>
+  /// [refresh] ignores the cached discography. Null when Deezer has no matching
+  /// artist. Throws on network failure (nothing is cached then, so the next
+  /// call retries).
+  Future<List<AlbumRelease>?> releases(String artist, {bool refresh = false}) =>
       _pending.putIfAbsent(artist.toLowerCase().trim(), () async {
         try {
-          return await _releases(artist);
+          return await _releases(artist, refresh: refresh);
         } finally {
           _pending.remove(artist.toLowerCase().trim());
         }
       });
 
-  Future<List<AlbumRelease>?> _releases(String artist) async {
+  Future<List<AlbumRelease>?> _releases(String artist, {bool refresh = false}) async {
     final f = _json(artist);
-    if (await f.exists()) {
+    if (!refresh && await f.exists()) {
       try {
         final j = jsonDecode(await f.readAsString()) as Map<String, dynamic>;
         final at = DateTime.fromMillisecondsSinceEpoch(j['at'] as int);
@@ -113,17 +116,9 @@ class Discography {
 
   Future<int?> _artistId(String artist) async {
     final res = await net.get(
-        Uri.https('api.deezer.com', '/search/artist', {'q': artist, 'limit': '5'}));
+        Uri.https('api.deezer.com', '/search/artist', {'q': artist, 'limit': '25'}));
     if (res.statusCode != 200) throw HttpException('Deezer HTTP ${res.statusCode}');
-    final j = jsonDecode(res.body);
-    if (j is! Map || j['data'] is! List) return null;
-    final want = ArtistArt.keyFor(artist);
-    for (final e in j['data'] as List) {
-      if (e is Map && ArtistArt.keyFor('${e['name']}') == want && e['id'] is int) {
-        return e['id'] as int;
-      }
-    }
-    return null;
+    return DeezerPopularity.parseArtistId(jsonDecode(res.body), artist);
   }
 
   /// Albums and EPs from a Deezer `/artist/{id}/albums` response.

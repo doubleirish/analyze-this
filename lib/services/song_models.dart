@@ -1,5 +1,6 @@
 // Library data types shared by the database, controllers and screens.
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:shared_core/shared_core.dart';
 
@@ -247,6 +248,8 @@ class Song {
 }
 
 enum SongSort { artist, title, bpm, steadiness, rating, duration, added, random }
+
+enum BrowseSort { songs, name, recent, favourite }
 
 /// System tag on songs whose audio is damaged (see [MusicDb.recordHealth]).
 const corruptTag = 'corrupt';
@@ -794,22 +797,106 @@ class DupGroup {
     var best = 0;
     for (var i = 1; i < songs.length; i++) {
       final a = songs[i], b = songs[best];
-      final c = counts[i].compareTo(counts[best]);
-      final better = c != 0
-          ? c > 0
-          : a.size != b.size
-              ? a.size > b.size
-              : (a.duration ?? 0) > (b.duration ?? 0);
+      final quality = compareSongQuality(a, b);
+      final better = quality < 0 || (quality == 0 && counts[i] > counts[best]);
       if (better) best = i;
     }
     return DupGroup(songs, counts, best);
   }
 
   List<Song> get suggestedRemovals => [
-        for (var i = 0; i < songs.length; i++)
-          if (i != keeper) songs[i]
-      ];
+    for (var i = 0; i < songs.length; i++)
+      if (i != keeper) songs[i],
+  ];
 }
+
+extension SongQuality on Song {
+  double? get estimatedKbps {
+    final seconds = duration;
+    if (seconds == null || !seconds.isFinite || seconds <= 0 || size <= 0) return null;
+    return size * 8 / seconds / 1000;
+  }
+
+  String get audioFormat => path.split(RegExp(r'[\\/]')).last.split('.').last.toLowerCase();
+
+  bool get androidNative => androidPlayable(path);
+
+  int get formatRank => switch (audioFormat) {
+    'wma' || 'm4a' || 'aac' => 2,
+    'mp3' => 1,
+    _ => 0,
+  };
+
+  String get qualityDescription => [
+    audioFormat.toUpperCase(),
+    estimatedKbps == null ? 'bitrate unknown' : '~${estimatedKbps!.round()} kbps',
+    if (damaged) 'damaged',
+  ].join(' · ');
+}
+
+/// Negative means [a] is preferred. Fixed ~5% bitrate bands keep the
+/// comparison transitive (pairwise percentage tolerances would not).
+int compareSongQuality(Song a, Song b, {bool forAndroid = false}) {
+  var c = (a.damaged ? 1 : 0).compareTo(b.damaged ? 1 : 0);
+  if (c != 0) return c;
+  if (forAndroid) {
+    c = (b.androidNative ? 1 : 0).compareTo(a.androidNative ? 1 : 0);
+    if (c != 0) return c;
+  }
+  int band(Song s) {
+    final kbps = s.estimatedKbps;
+    return kbps == null ? -100000 : (math.log(kbps) / math.log(1.05)).round();
+  }
+  c = band(b).compareTo(band(a));
+  if (c != 0) return c;
+  c = b.formatRank.compareTo(a.formatRank);
+  if (c != 0) return c;
+  return b.size.compareTo(a.size);
+}
+
+class SongCopies {
+  SongCopies(Iterable<Song> copies, {bool forAndroid = false}) {
+    final indexed = copies.indexed.toList()..sort((a, b) {
+      final quality = compareSongQuality(a.$2, b.$2, forAndroid: forAndroid);
+      return quality != 0 ? quality : a.$1.compareTo(b.$1);
+    });
+    songs = List.unmodifiable(indexed.map((s) => s.$2));
+  }
+
+  late final List<Song> songs;
+  Song get best => songs.first;
+  List<Song> get hidden => songs.skip(1).toList();
+}
+
+/// Album-scoped duplicates, in first-occurrence order. Different discs and
+/// untagged songs are kept separate rather than guessing from track numbers.
+List<SongCopies> groupDuplicates(Iterable<Song> songs, {bool forAndroid = false}) {
+  final groups = <Object, List<Song>>{};
+  final paths = <String>{};
+  for (final s in songs) {
+    if (!paths.add(s.path)) continue;
+    final key = s.dupKey?.trim() ?? '';
+    final album = s.album?.trim().toLowerCase() ?? '';
+    final Object group = key.isEmpty || album.isEmpty
+        ? Object()
+        : (key, album, s.discNo ?? 1);
+    (groups[group] ??= []).add(s);
+  }
+  return [
+    for (final copies in groups.values) SongCopies(copies, forAndroid: forAndroid),
+  ];
+}
+
+List<Song> resolveDuplicates(Iterable<Song> songs, {bool forAndroid = false}) => [
+  for (final copies in groupDuplicates(songs, forAndroid: forAndroid)) copies.best,
+];
+
+/// Candidates only; the deletion service revalidates the files after confirmation.
+List<Song> damagedDuplicateCopies(Iterable<Song> songs) => [
+  for (final copies in groupDuplicates(songs))
+    if (copies.songs.any((s) => !s.damaged))
+      ...copies.songs.where((s) => s.damaged),
+];
 
 /// Title of an artist's synthetic "Best of" album (see best_of.dart).
 String bestOfTitle(String artist) => '$artist: Best of';

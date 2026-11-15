@@ -80,7 +80,7 @@ class DeezerPopularity {
   /// Null when Deezer doesn't know the artist; throws on network failure.
   Future<List<RankedTrack>?> topTracks(String artist) async {
     final res = await net.get(Uri.https('api.deezer.com', '/search/artist',
-        {'q': artist.replaceAll(RegExp(r'["\\]'), ' '), 'limit': '10'}));
+        {'q': artist.replaceAll(RegExp(r'["\\]'), ' '), 'limit': '25'}));
     if (res.statusCode != 200) throw HttpException('Deezer HTTP ${res.statusCode}');
     final id = parseArtistId(jsonDecode(res.body), artist);
     if (id == null) return null;
@@ -89,16 +89,23 @@ class DeezerPopularity {
     return parseTop(jsonDecode(top.body));
   }
 
-  /// First search hit whose name matches [artist] (ignoring case and spacing).
+  /// The matching search hit (ignoring case and spacing) with the most fans,
+  /// since Deezer has several artists named alike and ranks them arbitrarily.
   static int? parseArtistId(Object? json, String artist) {
     if (json is! Map || json['data'] is! List) return null;
     final want = ArtistArt.keyFor(artist);
+    int? best;
+    var bestFans = -1;
     for (final e in json['data'] as List) {
       if (e is Map && e['id'] is int && ArtistArt.keyFor('${e['name']}') == want) {
-        return e['id'] as int;
+        final fans = e['nb_fan'] is int ? e['nb_fan'] as int : 0;
+        if (fans > bestFans) {
+          best = e['id'] as int;
+          bestFans = fans;
+        }
       }
     }
-    return null;
+    return best;
   }
 
   static List<RankedTrack> parseTop(Object? json) {

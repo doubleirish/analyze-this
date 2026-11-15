@@ -15,7 +15,9 @@ import 'class_history.dart';
 import 'package:shared_core/shared_core.dart';
 
 import 'mix_screen.dart';
+import 'output_picker.dart';
 import 'tools_screen.dart';
+import 'with_player.dart';
 
 class HomeScreen extends StatelessWidget {
   const HomeScreen({super.key});
@@ -32,12 +34,12 @@ class HomeScreen extends StatelessWidget {
               IconButton(
                 tooltip: 'Library tools: tidy tags, organize files, history, sharing',
                 icon: const Icon(Icons.build),
-                onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const ToolsScreen())),
+                onPressed: () => Navigator.push(context, playerRoute(builder: (_) => const ToolsScreen())),
               ),
               IconButton(
                 tooltip: 'Library insights: stats, discography gaps and program readiness',
                 icon: const Icon(Icons.insights),
-                onPressed: () => Navigator.push(context, MaterialPageRoute(builder: (_) => const InsightsScreen())),
+                onPressed: () => Navigator.push(context, playerRoute(builder: (_) => const InsightsScreen())),
               ),
             ],
             bottom: const TabBar(
@@ -69,7 +71,7 @@ class HomeScreen extends StatelessWidget {
               ],
             ),
           ),
-          bottomNavigationBar: const MiniPlayer(),
+          bottomNavigationBar: const MiniPlayer(extraActions: [OutputButton()]),
           body: const Column(
             children: [
               ClassSuggestionBanner(),

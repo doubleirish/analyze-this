@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:shared_core/shared_core.dart';
+import 'package:analyze_this/services/app_state.dart';
 import 'package:analyze_this/services/db.dart';
 import 'package:analyze_this/services/discography.dart';
 import 'package:analyze_this/services/lyric_keywords.dart';
@@ -154,12 +155,63 @@ void main() {
 
   test('artists sort by song count or name and hide small ones', () async {
     final db = await _library();
-    expect((await db.artists(bySongs: false)).map((a) => a.name.trim().toLowerCase()),
+    expect((await db.artists(sort: BrowseSort.name)).map((a) => a.name.trim().toLowerCase()),
         ['blur', 'europe', 'oasis']);
     expect(await db.artists(hideUpTo: 1), hasLength(1));
-    expect((await db.albums(bySongs: true)).first.songs, 2);
+    expect((await db.albums(sort: BrowseSort.songs)).first.songs, 2);
     expect(await db.albums(hideUpTo: 1), hasLength(1));
     await db.close();
+  });
+
+  test('artists and albums sort by latest added track or favourite count', () async {
+    final db = await MusicDb.open(':memory:');
+    addTearDown(db.close);
+    for (final (path, artist, album, added) in [
+      ('a1', 'Alpha', 'A', 300),
+      ('a2', 'Alpha', 'B', 100),
+      ('b1', 'Beta', 'C', 200),
+      ('b2', 'Beta', 'C', 500),
+      ('b3', 'Beta', 'C', 100),
+      ('c1', 'Gamma', 'D', null),
+    ]) {
+      await db.upsertSong(Song(path: path, artist: artist, album: album, addedAt: added));
+    }
+    for (final path in ['a1', 'a2', 'b1', 'c1']) {
+      await db.setFav(path, true);
+    }
+
+    expect((await db.artists(sort: BrowseSort.recent)).map((a) => a.name),
+        ['Beta', 'Alpha', 'Gamma']);
+    expect((await db.albums(sort: BrowseSort.recent)).map((a) => a.album),
+        ['C', 'A', 'B', 'D']);
+    expect((await db.artists(sort: BrowseSort.favourite)).map((a) => a.name),
+        ['Alpha', 'Beta', 'Gamma']);
+    expect((await db.albums(sort: BrowseSort.favourite)).map((a) => a.album),
+        ['C', 'A', 'B', 'D']);
+    expect((await db.artists(sort: BrowseSort.favourite, hideUpTo: 1)).map((a) => a.name),
+        ['Alpha', 'Beta']);
+    await db.setFav('b2', true);
+    expect((await db.artists(sort: BrowseSort.favourite)).map((a) => a.name),
+        ['Beta', 'Alpha', 'Gamma']);
+  });
+
+  test('browse sort restores legacy and new preferences', () async {
+    final db = await MusicDb.open(':memory:');
+    final state = AppState(db);
+    addTearDown(() async {
+      state.dispose();
+      await db.close();
+    });
+    await db.setSetting('browse_by_songs', '0');
+    await state.load();
+    expect(state.browseSort, BrowseSort.name);
+    await state.setBrowse(sort: BrowseSort.recent);
+    expect(await db.setting('browse_sort'), 'recent');
+    await state.load();
+    expect(state.browseSort, BrowseSort.recent);
+    await state.setBrowse(sort: BrowseSort.favourite);
+    await state.load();
+    expect(state.browseSort, BrowseSort.favourite);
   });
 
   test('duplicate suggestions keep the copy in the folder with more songs', () async {
@@ -176,6 +228,47 @@ void main() {
     expect(groups.single.songs[groups.single.keeper].path, '/big/a.mp3');
     expect(groups.single.suggestedRemovals.map((s) => s.path), ['/small/a.mp3']);
     await db.close();
+  });
+
+  Song copy(String path, {int kbps = 256, bool damaged = false,
+      String album = 'Bowie', String title = 'Heroes', int? disc,
+      String? key = 'bowie|heroes', double? seconds = 200}) => Song(
+    path: path, artist: 'David Bowie', title: title, album: album,
+    dupKey: key, duration: seconds, size: kbps * 125 * 200,
+    discNo: disc, userTags: damaged ? [corruptTag] : [],
+  );
+
+  test('copy ranking prefers healthy, then bitrate, then format; Android prefers native', () {
+    final mp3 = copy('a.mp3', kbps: 192);
+    final wma = copy('a.wma', kbps: 256);
+    final broken = copy('broken.m4a', kbps: 320, damaged: true);
+    expect(resolveDuplicates([mp3, broken, wma]).single.path, wma.path);
+    expect(resolveDuplicates([mp3, wma], forAndroid: true).single.path, mp3.path);
+    expect(resolveDuplicates([broken, wma], forAndroid: true).single.path, wma.path);
+    expect(compareSongQuality(copy('equal.mp3'), wma), greaterThan(0));
+    expect(compareSongQuality(copy('higher.mp3', kbps: 320), wma), lessThan(0));
+    expect(DupGroup.rank([broken, wma], {dirOf(broken.path): 500}).keeper, 1);
+    expect(compareSongQuality(copy('unknown.mp3', seconds: null), wma), greaterThan(0));
+  });
+
+  test('copy groups preserve first track order, album/disc versions and untagged songs', () {
+    final low = copy('low.mp3', kbps: 128);
+    final other = copy('other.mp3', key: 'bowie|changes', title: 'Changes');
+    final high = copy('high.wma');
+    final live = copy('live.mp3', album: 'Live');
+    final disc2 = copy('disc2.mp3', disc: 2);
+    final untitled = copy('untitled.mp3', key: '');
+    final untitled2 = copy('untitled2.mp3', key: '');
+    final groups = groupDuplicates([low, other, high, live, disc2, untitled, untitled2]);
+    expect(groups.map((g) => g.best.path),
+        ['high.wma', 'other.mp3', 'live.mp3', 'disc2.mp3', 'untitled.mp3', 'untitled2.mp3']);
+    expect(groups.first.hidden.single.path, low.path);
+    expect(resolveDuplicates([copy('noalbum.mp3', album: ''), copy('noalbum.wma', album: '')]),
+        hasLength(2));
+    expect(damagedDuplicateCopies([copy('a.mp3', damaged: true), copy('b.wma', damaged: true)]),
+        isEmpty);
+    expect(damagedDuplicateCopies([low, copy('bad.wma', damaged: true), live])
+        .map((s) => s.path), ['bad.wma']);
   });
 
   test('artists and albums group ignoring case, filter and drill down', () async {
@@ -363,7 +456,10 @@ void main() {
           if (r.url.host == 'api.deezer.com') {
             return http.Response(r.url.queryParameters['q'] == 'Oasis' ? body : '{"data":[]}', 200);
           }
-          return http.Response.bytes([0xFF, 0xD8, ...List.filled(498, 7)], 200);
+          if (r.url.host.endsWith('mzstatic.com') || r.url.host.endsWith('dzcdn.net')) {
+            return http.Response.bytes([0xFF, 0xD8, ...List.filled(498, 7)], 200);
+          }
+          return http.Response('{}', 200); // fallback sources: no match
         }),
       );
       final art = ArtistArt(tmp, net: net);
@@ -378,11 +474,42 @@ void main() {
         expect(calls, 2);
 
         expect(await art.fetch('Nobody'), isNull);
-        expect(calls, 3);
+        final afterMiss = calls;
+        expect(afterMiss, greaterThan(3)); // Deezer plus the fallback sources
         expect(await art.fetch('Nobody'), isNull); // remembered
-        expect(calls, 3);
+        expect(calls, afterMiss);
         expect(await art.fetch('Nobody', force: true), isNull); // forced retry
-        expect(calls, 4);
+        expect(calls, greaterThan(afterMiss)); // forced retry asks again
+      } finally {
+        await tmp.delete(recursive: true);
+      }
+    });
+
+    test('falls back to other sources, loosely matching names, and retries old empty markers', () async {
+      final tmp = await Directory.systemTemp.createTemp('artist_art_');
+      final net = PoliteHttp(
+        defaultGap: Duration.zero,
+        client: MockClient((r) async {
+          if (r.url.host == 'api.deezer.com') return http.Response('{"data":[]}', 200);
+          if (r.url.host == 'www.theaudiodb.com') {
+            return http.Response.bytes(
+                utf8.encode(jsonEncode({'artists': [{'strArtist': 'Beyoncé', 'strArtistThumb': 'https://r2.theaudiodb.com/b.jpg'}]})),
+                200);
+          }
+          if (r.url.host == 'r2.theaudiodb.com') {
+            return http.Response.bytes([0xFF, 0xD8, ...List.filled(498, 3)], 200);
+          }
+          return http.Response('{}', 200);
+        }),
+      );
+      final art = ArtistArt(tmp, net: net);
+      try {
+        await File('${tmp.path}/beyonce.none').writeAsString(''); // pre-fallback miss
+        expect(await art.fetch('Beyonce'), isNotNull);
+        expect(await File('${tmp.path}/beyonce.none').exists(), isFalse);
+        expect(looseArtistKey('The Black Keys & Co feat. X'), looseArtistKey('black keys and co'));
+        expect(isTrustedImageUrl('https://upload.wikimedia.org/a.jpg'), isTrue);
+        expect(isTrustedImageUrl('https://evil.example/a.jpg'), isFalse);
       } finally {
         await tmp.delete(recursive: true);
       }
