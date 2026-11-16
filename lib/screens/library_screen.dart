@@ -13,12 +13,13 @@ import 'trim_dialog.dart';
 import 'mix_add.dart';
 import 'wishlist_view.dart';
 import 'with_player.dart';
+import 'output_picker.dart';
 
 Future<void> playSong(BuildContext context, AppState s, String path) async {
   if (s.mode == PlayMode.mix && !s.mixer.mix.any((m) => m.path == path)) s.setMode(PlayMode.alphabetical);
   await s.play(path);
   if (context.mounted) {
-    await Navigator.push(context, MaterialPageRoute(builder: (_) => const NowPlayingScreen()));
+    await Navigator.push(context, MaterialPageRoute(builder: (_) => const NowPlayingScreen(extraActions: [OutputButton()])));
   }
 }
 

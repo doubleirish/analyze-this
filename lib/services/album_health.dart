@@ -73,12 +73,21 @@ String albumFolder(String path) {
   return dir.join('/').toLowerCase();
 }
 
+final _mixtapeFolder = RegExp(r'\[[0-9a-f]{6}\]$');
+
+/// Exported mixtape folders ("Name · 60 min [111a47]") keep each song's
+/// original album tags and track numbers, so they aren't real albums.
+bool isMixtapeExport(String path) {
+  final parts = path.split(RegExp(r'[\\/]'));
+  return parts.length > 1 && _mixtapeFolder.hasMatch(parts[parts.length - 2].trim());
+}
+
 /// Groups songs into albums (same normalised title in the same folder).
 Map<String, List<Song>> groupAlbums(Iterable<Song> songs) {
   final out = <String, List<Song>>{};
   for (final s in songs) {
     final a = (s.album ?? '').trim();
-    if (a.isEmpty) continue;
+    if (a.isEmpty || isMixtapeExport(s.path)) continue;
     final k = '${albumKey(a)}|${albumFolder(s.path)}';
     out.putIfAbsent(k, () => []).add(s);
   }

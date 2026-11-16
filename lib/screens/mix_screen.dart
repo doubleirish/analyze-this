@@ -32,6 +32,7 @@ import 'segment_editor.dart';
 import 'annotate_player.dart';
 import 'playlist_text_dialog.dart';
 import 'with_player.dart';
+import 'output_picker.dart';
 import '../services/mix_csv.dart';
 
 /// The top-level ways of working on the Mix page; each shows only its panels.
@@ -1001,7 +1002,8 @@ class _MixTabState extends State<MixTab> {
                                   await app.playMix();
                                   nav.push(
                                     MaterialPageRoute(
-                                      builder: (_) => const NowPlayingScreen(),
+                                      builder: (_) => const NowPlayingScreen(
+                                          extraActions: [OutputButton()]),
                                     ),
                                   );
                                 },

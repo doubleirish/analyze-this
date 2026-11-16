@@ -23,6 +23,11 @@ Song song(int n, {String? title, int? total, int? disc, int? discTotal, double? 
 List<String> msgs(List<AlbumHealth> r) => [for (final a in r) for (final i in a.issues) i.message];
 
 void main() {
+  test('exported mixtape folders are not treated as albums', () {
+    final r = checkAlbums([song(7, dir: '/m/Mixtapes/Intervals · 60 min [111a47]')]);
+    expect(r, isEmpty);
+  });
+
   test('complete album has no issues', () {
     expect(checkAlbums([for (var i = 1; i <= 5; i++) song(i, total: 5)]), isEmpty);
   });
