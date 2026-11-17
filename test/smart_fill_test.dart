@@ -119,10 +119,9 @@ void main() {
   });
 
   test('fillReport', () {
-    expect(fillReport(12, 1, 2), 'Filled 12 songs · 1 relaxed · 2 big jumps');
-    expect(fillReport(1, 0, 0), 'Filled 1 song');
-    expect(fillReport(3, 0, 1), 'Filled 3 songs · 1 big jump');
-    expect(fillReport(3, 0, 0, uneven: 1), 'Filled 3 songs · 1 uneven part');
+    expect(fillReport(12, 1), 'Filled 12 songs · 1 relaxed');
+    expect(fillReport(1, 0), 'Filled 1 song');
+    expect(fillReport(3, 0, uneven: 1), 'Filled 3 songs · 1 uneven part');
   });
 
   group('planPartSongs', () {

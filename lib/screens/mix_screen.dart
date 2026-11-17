@@ -913,7 +913,6 @@ class _MixTabState extends State<MixTab> {
     final app = context.watch<AppState>();
     final s = context.watch<MixController>();
     if (_name.text != s.mixName) _name.text = s.mixName;
-    final jumps = s.jumps.toSet();
     final left = s.remainingSeconds;
     return Padding(
       padding: const EdgeInsets.all(12),
@@ -1201,8 +1200,7 @@ class _MixTabState extends State<MixTab> {
                                     Text(
                                       '${song.medianBpm?.round() ?? '-'} BPM   ${song.playSeconds == null ? '' : _fmt(song.playSeconds!)}${song.trimmed ? ' ✂' : ''}'
                                       '${song.damaged ? '   ⚠ damaged audio: replace it' : ''}'
-                                      '${warn == null ? '' : '   ⚠ tempo off for this part'}'
-                                      '${jumps.contains(i) ? '   ⚠ big tempo jump to next song' : ''}',
+                                      '${warn == null ? '' : '   ⚠ tempo off for this part'}',
                                       style: Theme.of(context).textTheme.bodySmall,
                                     ),
                                     if (s.songNotes[song.path] != null)

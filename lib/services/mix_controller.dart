@@ -862,7 +862,7 @@ class MixController extends ChangeNotifier {
 
   /// e.g. "Filled 12 songs · 1 relaxed · 2 big jumps" for the last fill.
   String get lastFillReport =>
-      fillReport(lastFillAdded, lastFillRelaxed, lastFillBigJumps, uneven: lastFillUneven);
+      fillReport(lastFillAdded, lastFillRelaxed, uneven: lastFillUneven);
 
   /// Songs for one activity of [p] lasting about [need] seconds (see
   /// [planPartSongs]): exact tempo matches first, then a wider RPM band,

@@ -46,6 +46,7 @@ class ToolsScreen extends StatelessWidget {
           body: const TabBarView(children: [
             _TidyTab(),
             RelabelView(),
+            _OrganizeTab(),
             _MissingTab(),
             _HealthTab(),
             _DamageTab(),

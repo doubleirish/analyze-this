@@ -101,12 +101,11 @@ List<Song> orderChain(List<Song> songs, {Song? previous}) {
   return out;
 }
 
-/// Snackbar text after an auto-fill, e.g. "Filled 12 songs · 1 relaxed · 2 big jumps".
-String fillReport(int songs, int relaxed, int bigJumps, {int uneven = 0}) => [
+/// Snackbar text after an auto-fill, e.g. "Filled 12 songs · 1 relaxed". Big tempo jumps are intentional, so not reported.
+String fillReport(int songs, int relaxed, {int uneven = 0}) => [
       'Filled $songs song${songs == 1 ? '' : 's'}',
       if (relaxed > 0) '$relaxed relaxed',
       if (uneven > 0) '$uneven uneven part${uneven == 1 ? '' : 's'}',
-      if (bigJumps > 0) '$bigJumps big jump${bigJumps == 1 ? '' : 's'}',
     ].join(' · ');
 
 // ------------------------------------------------- balanced part planning --
